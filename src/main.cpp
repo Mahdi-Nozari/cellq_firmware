@@ -1,18 +1,18 @@
 #include <Arduino.h>
+#include "Debug.h"
+#include "Display.h"
+#include "ManualMode.h"
 
-// put function declarations here:
-int myFunction(int, int);
-
-void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+void setup(){
+  DBG_BEGIN();
+  cellq::manual::begin();
+  cellq::display::begin();
+  DBG_BOOT();
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+void loop(){
+  cellq::manual::update(millis());
+  cellq::display::service();
+  cellq::display::Event event;
+  while(cellq::display::nextEvent(event))cellq::manual::handleDisplayEvent(event,millis());
 }
