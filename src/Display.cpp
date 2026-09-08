@@ -11,6 +11,17 @@ cellq::display::Event eventQueue[cellq::config::DISPLAY_EVENT_QUEUE_SIZE];
 uint8_t queueHead=0;
 uint8_t queueTail=0;
 
+uint8_t appendUnsigned(char *text,uint16_t value){
+  char reverse[5];
+  uint8_t count=0;
+  do{
+    reverse[count++]=static_cast<char>('0'+value%10U);
+    value/=10U;
+  }while(value>0);
+  for(uint8_t i=0;i<count;++i)text[i]=reverse[count-1U-i];
+  return count;
+}
+
 void onGenieEvent(){
   genieFrame frame;
   if(!genie.DequeueEvent(&frame))return;
@@ -54,6 +65,33 @@ bool nextEvent(Event &event){
 void setManualSwitch(uint8_t channel,bool on){
   if(channel>=hw::CHANNEL_COUNT)return;
   genie.WriteObject(gui::ISWITCH_OBJECT,gui::MANUAL_VALVE_SWITCH_FIRST+channel,on?1:0);
+}
+
+void setManualPressureLabel(uint8_t regulator,int16_t tenths){
+  if(regulator>=hw::REGULATOR_COUNT)return;
+  char text[13];
+  uint8_t pos=0;
+  if(tenths<0)text[pos++]='-';
+  const uint16_t magnitude=tenths<0?static_cast<uint16_t>(-static_cast<int32_t>(tenths)):static_cast<uint16_t>(tenths);
+  pos+=appendUnsigned(text+pos,magnitude/10U);
+  text[pos++]='.';
+  text[pos++]=static_cast<char>('0'+magnitude%10U);
+  text[pos++]=' ';
+  text[pos++]='k';
+  text[pos++]='P';
+  text[pos++]='a';
+  text[pos]='\0';
+  genie.WriteInhLabel(gui::MANUAL_PRESSURE_LABEL[regulator],text);
+}
+
+void setManualTimeLabel(uint8_t channel,uint16_t seconds){
+  if(channel>=hw::CHANNEL_COUNT)return;
+  char text[9];
+  uint8_t pos=appendUnsigned(text,seconds);
+  text[pos++]=' ';
+  text[pos++]='s';
+  text[pos]='\0';
+  genie.WriteInhLabel(gui::MANUAL_TIME_LABEL_FIRST+channel,text);
 }
 }
 }

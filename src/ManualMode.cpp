@@ -14,6 +14,16 @@ uint16_t activeTimeSeconds_[cellq::hw::CHANNEL_COUNT]={};
 uint32_t valveStartedMs_[cellq::hw::CHANNEL_COUNT]={};
 bool valveOn_[cellq::hw::CHANNEL_COUNT]={};
 
+void refreshLabels(){
+  for(uint8_t regulator=0;regulator<cellq::hw::REGULATOR_COUNT;++regulator){
+    cellq::display::setManualPressureLabel(regulator,pressureTenths_[regulator]);
+  }
+  for(uint8_t channel=0;channel<cellq::hw::CHANNEL_COUNT;++channel){
+    cellq::display::setManualTimeLabel(channel,onTimeSeconds_[channel]);
+  }
+  DBG_MANUAL_SYNC();
+}
+
 void setValve(uint8_t channel,bool on,uint32_t now){
   if(channel>=cellq::hw::CHANNEL_COUNT)return;
   digitalWrite(cellq::hw::VALVE_PINS[channel],on?cellq::hw::VALVE_ON:cellq::hw::VALVE_OFF);
@@ -33,6 +43,7 @@ void adjustPressure(uint8_t regulator,int8_t direction){
   if(next<cellq::config::MANUAL_PRESSURE_MIN_TENTHS)next=cellq::config::MANUAL_PRESSURE_MIN_TENTHS;
   if(next>cellq::config::MANUAL_PRESSURE_MAX_TENTHS)next=cellq::config::MANUAL_PRESSURE_MAX_TENTHS;
   pressureTenths_[regulator]=next;
+  cellq::display::setManualPressureLabel(regulator,next);
   DBG_PRESSURE(regulator+1U,next);
 }
 
@@ -40,6 +51,7 @@ void adjustTime(uint8_t channel,int8_t direction){
   if(channel>=cellq::hw::CHANNEL_COUNT)return;
   if(direction>0&&onTimeSeconds_[channel]<UINT16_MAX)++onTimeSeconds_[channel];
   if(direction<0&&onTimeSeconds_[channel]>0)--onTimeSeconds_[channel];
+  cellq::display::setManualTimeLabel(channel,onTimeSeconds_[channel]);
   DBG_TIME(channel+1U,onTimeSeconds_[channel]);
 }
 }
@@ -47,11 +59,14 @@ void adjustTime(uint8_t channel,int8_t direction){
 namespace cellq {
 namespace manual {
 void begin(){
+  for(uint8_t regulator=0;regulator<hw::REGULATOR_COUNT;++regulator){
+    pressureTenths_[regulator]=config::MANUAL_PRESSURE_DEFAULT_TENTHS;
+  }
   for(uint8_t channel=0;channel<hw::CHANNEL_COUNT;++channel){
     digitalWrite(hw::VALVE_PINS[channel],hw::VALVE_OFF);
     pinMode(hw::VALVE_PINS[channel],OUTPUT);
     digitalWrite(hw::VALVE_PINS[channel],hw::VALVE_OFF);
-    onTimeSeconds_[channel]=0;
+    onTimeSeconds_[channel]=config::MANUAL_TIME_DEFAULT_SECONDS;
     activeTimeSeconds_[channel]=0;
     valveStartedMs_[channel]=0;
     valveOn_[channel]=false;
@@ -70,6 +85,10 @@ void update(uint32_t now){
 }
 
 void handleDisplayEvent(const display::Event &event,uint32_t now){
+  if(event.object==gui::FORM_OBJECT&&event.index==gui::MANUAL_FORM){
+    refreshLabels();
+    return;
+  }
   if(event.object==gui::ISWITCH_OBJECT&&event.index>=gui::MANUAL_VALVE_SWITCH_FIRST&&event.index<=gui::MANUAL_VALVE_SWITCH_LAST){
     setValve(event.index-gui::MANUAL_VALVE_SWITCH_FIRST,event.value!=0,now);
     return;

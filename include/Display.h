@@ -13,5 +13,7 @@ void begin();
 void service();
 bool nextEvent(Event &event);
 void setManualSwitch(uint8_t channel,bool on);
+void setManualPressureLabel(uint8_t regulator,int16_t tenths);
+void setManualTimeLabel(uint8_t channel,uint16_t seconds);
 }
 }
