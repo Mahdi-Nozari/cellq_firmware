@@ -25,10 +25,18 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,E,<cmd>,<object>,<index>,<value>` | A raw event was received from the display. |
 | `D,E,DROP` | The display event queue was full, so an event was discarded. |
 | `D,P,<regulator>,<tenths>` | A manual pressure setting changed. |
+| `D,DAC,<regulator>,<code>,<result>` | An MCP4725 command was attempted. |
 | `D,T,<channel>,<seconds>` | A manual valve time setting changed. |
 | `D,V,<channel>,<state>` | A physical valve output command was issued. |
 | `D,TO,<channel>` | A timed valve reached its duration and was automatically switched off. |
 | `D,M,SYNC` | The current Manual-mode pressure and time values were sent to the LCD labels. |
+| `D,SW,LOAD,1` | Factory Square-wave preset 1 was loaded on Form 2. |
+| `D,SW,START` | The Square-wave procedure started. |
+| `D,SW,PAUSE` | The Square-wave procedure paused with outputs preserved. |
+| `D,SW,RESUME` | The paused Square-wave procedure resumed. |
+| `D,SW,STOP` | The Square-wave procedure stopped and outputs returned to idle. |
+| `D,SW,DONE` | The configured total cycle count completed. |
+| `D,SW,ERR,DAC` | A regulator DAC command failed while starting the procedure. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
 
@@ -38,7 +46,7 @@ All regulator and channel numbers in the action messages are human-readable and 
 D,BOOT,OK
 ```
 
-This confirms that firmware setup reached completion after valve initialization and display startup.
+This confirms that firmware setup reached completion after valve, regulator, and display initialization.
 
 It does not confirm that the display, valves, sensors, or regulators are physically operating.
 
@@ -55,7 +63,7 @@ Fields:
 - `index`: Workshop object index
 - `value`: value reported by the object
 
-This message shows that the firmware received an event. It does not by itself mean that Manual mode accepted or acted on it. Look for a following `D,P`, `D,T`, `D,V`, or `D,M,SYNC` message to confirm the action.
+This message shows that the firmware received an event. It does not by itself mean that the active mode accepted or acted on it. Look for a following mode-specific message to confirm the action.
 
 ### Current Manual-mode event indices
 
@@ -69,6 +77,14 @@ This message shows that the firmware received an event. It does not by itself me
 | Userbutton | 15-20 | Time plus for channels 1-6 |
 
 The numeric `cmd` and `object` fields come from the Genie library. The Workshop project must use the object types and indices above and must have the necessary Report Events enabled.
+
+### Current Square-wave event indices
+
+| LCD object | Index | Function |
+|---|---:|---|
+| Form | 2 | Load factory preset 1 and synchronize the Square-wave page |
+| Userbutton | 27 | Start or stop the procedure |
+| Userbutton | 28 | Pause or continue the procedure |
 
 ## Queue overflow message
 
@@ -89,16 +105,38 @@ D,P,<regulator>,<tenths>
 Example:
 
 ```text
-D,P,1,12
+D,P,1,-790
 ```
 
-This means regulator 1's Manual-mode setting changed to `1.2 kPa`. The value is reported in tenths of a kPa:
+This means regulator 1's Manual-mode setting changed to `-79.0 kPa`. The value is reported in tenths of a kPa:
 
 - `0` means `0.0 kPa`
-- `10` means `1.0 kPa`
-- `50` means `5.0 kPa`
+- `-10` means `-1.0 kPa`
+- `-800` means `-80.0 kPa`
 
-The current firmware updates the stored setting and LCD label only. It does not yet send this setting to either MCP4725 DAC or physically control regulator pressure.
+The Manual-mode range is `-80.0` to `0.0 kPa` in `1.0 kPa` steps. Each accepted change updates the stored setting and LCD label and sends the corresponding command to the regulator DAC.
+
+## DAC-command message
+
+```text
+D,DAC,<regulator>,<code>,<result>
+```
+
+Example:
+
+```text
+D,DAC,1,3945,1
+```
+
+Fields:
+
+- `regulator`: regulator 1 or 2
+- `code`: 12-bit MCP4725 command from `0` to `4095`
+- `result`: `1` if the I2C transmission was acknowledged, or `0` if it failed
+
+The pressure magnitude maps linearly from `0-82 kPa` to DAC code `0-4095`. For example, `-80.0 kPa` produces code `3995`. Commands update the DAC register only and do not write its EEPROM.
+
+An acknowledged I2C transmission confirms communication with a device at the configured address. It does not independently confirm the resulting analog voltage or pneumatic pressure.
 
 ## Time-setting message
 
@@ -160,9 +198,11 @@ This means the firmware processed the report event for Manual Form 1 and sent th
 - Regulator 1 and regulator 2 pressure labels
 - Valve channel 1-6 time labels
 
-At boot, the current defaults are:
+LCD label writes contain only the numeric values. The `kPa` and `s` units are static text in the Workshop GUI and are not sent by the firmware.
 
-- Pressure: `1.0 kPa` for both regulators
+The stored Manual defaults are:
+
+- Pressure: `-80.0 kPa` for both regulators
 - Valve time: `0 s` for all six channels
 
 This message confirms that the write functions were called. Visual confirmation on the LCD still depends on the correct Workshop label indices, display baud rate, serial wiring, and Report Event configuration.
@@ -172,24 +212,62 @@ This message confirms that the write functions were called. Visual confirmation 
 ### Firmware startup
 
 ```text
+D,DAC,1,0,<result>
+D,DAC,2,0,<result>
 D,BOOT,OK
 ```
+
+Each DAC is commanded to the zero/safe code at startup. Manual pressure defaults are applied only after Manual Form 1 becomes active. Each `<result>` is `1` for an acknowledged I2C write or `0` for a failed write.
 
 ### Opening Manual Form 1
 
 ```text
 D,E,<cmd>,<form-object>,1,<value>
+D,DAC,1,3995,<result>
+D,DAC,2,3995,<result>
 D,M,SYNC
 ```
+
+### Opening Square-wave Form 2
+
+```text
+D,E,<cmd>,<form-object>,2,<value>
+D,SW,LOAD,1
+```
+
+Preset labels and images are then written once in staged updates. Scope0 receives its static preview once after page synchronization.
+
+### Starting and completing factory preset 1
+
+```text
+D,DAC,1,99,1
+D,DAC,2,99,1
+D,SW,START
+D,DAC,1,0,1
+D,DAC,2,0,1
+D,SW,DONE
+```
+
+The `99` DAC code corresponds to the preset's `-2.0 kPa` command under the confirmed 0-82 kPa conversion. Cycle progress is intentionally not printed every cycle.
+
+### Pausing and continuing
+
+```text
+D,SW,PAUSE
+D,SW,RESUME
+```
+
+Pause keeps the current valve and regulator outputs unchanged. Resume continues from the preserved elapsed time and waveform phase.
 
 ### Changing a pressure setting
 
 ```text
 D,E,<cmd>,<userbutton-object>,4,<value>
-D,P,1,11
+D,DAC,1,3945,1
+D,P,1,-790
 ```
 
-This example is regulator 1's plus button changing `1.0 kPa` to `1.1 kPa`.
+This example is regulator 1's plus button changing `-80.0 kPa` to `-79.0 kPa`. DAC result `1` means that the I2C write was acknowledged.
 
 ### Switching a timed valve on and reaching timeout
 
