@@ -218,6 +218,7 @@ void finishProcedure() {
   DBG_SQUARE("DONE");
 }
 
+#if CELLQ_REQUIRE_DAC_ACK
 void failStart() {
   idleOutputs();
   state_ = ProcedureState::Error;
@@ -228,6 +229,7 @@ void failStart() {
   writeProcedureState();
   DBG_SQUARE("ERR,DAC");
 }
+#endif
 
 void updateWaveform() {
   if (activePreset_.frequencyTenthsHz == 0) {
@@ -287,8 +289,12 @@ void startProcedure(uint32_t now) {
   const bool regulator2Ok =
       cellq::regulator::setPressureTenths(1, activePreset_.pressureTenths[1]);
   if (!regulator1Ok || !regulator2Ok) {
+#if CELLQ_REQUIRE_DAC_ACK
     failStart();
     return;
+#else
+    DBG_SQUARE("WARN,DAC,IGNORED");
+#endif
   }
 
   state_ = ProcedureState::Running;

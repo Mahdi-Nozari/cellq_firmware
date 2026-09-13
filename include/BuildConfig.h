@@ -1,10 +1,15 @@
 #pragma once
 #define CELLQ_DEBUG 1
+#define CELLQ_REQUIRE_DAC_ACK 0
 
 #include <stdint.h>
 
 #if CELLQ_DEBUG != 0 && CELLQ_DEBUG != 1
 #error CELLQ_DEBUG must be 0 or 1
+#endif
+
+#if CELLQ_REQUIRE_DAC_ACK != 0 && CELLQ_REQUIRE_DAC_ACK != 1
+#error CELLQ_REQUIRE_DAC_ACK must be 0 or 1
 #endif
 
 namespace cellq {

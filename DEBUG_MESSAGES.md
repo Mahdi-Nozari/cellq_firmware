@@ -8,12 +8,16 @@ This guide describes the USB serial debug messages currently produced by the Cel
 - Baud rate: `250000`
 - Line ending: any setting is acceptable because the firmware does not read debug commands
 - Debug switch: `CELLQ_DEBUG` at the top of `include/BuildConfig.h`
+- DAC acknowledgment policy: `CELLQ_REQUIRE_DAC_ACK` immediately below it
 
 ```cpp
 #define CELLQ_DEBUG 1
+#define CELLQ_REQUIRE_DAC_ACK 0
 ```
 
 Use `1` to enable messages. Use `0` to compile out the debug calls and their text.
+
+For `CELLQ_REQUIRE_DAC_ACK`, use `0` during display-only bench testing so the Square-wave procedure can run without physical DACs. Set it to `1` when the DACs are installed so a missing acknowledgment changes the procedure to ERROR. The firmware attempts the I2C writes in both modes.
 
 Debug output is best-effort. A message is skipped when there is not enough room in the serial transmit buffer, so debugging cannot block important firmware work.
 
@@ -36,6 +40,7 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,RESUME` | The paused Square-wave procedure resumed. |
 | `D,SW,STOP` | The Square-wave procedure stopped and outputs returned to idle. |
 | `D,SW,DONE` | The configured total cycle count completed. |
+| `D,SW,WARN,DAC,IGNORED` | A DAC did not acknowledge, but the procedure continued because DAC acknowledgment enforcement is disabled. |
 | `D,SW,ERR,DAC` | A regulator DAC command failed while starting the procedure. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
@@ -249,6 +254,17 @@ D,SW,DONE
 ```
 
 The `99` DAC code corresponds to the preset's `-2.0 kPa` command under the confirmed 0-82 kPa conversion. Cycle progress is intentionally not printed every cycle.
+
+During display-only testing without DACs, the start sequence instead includes:
+
+```text
+D,DAC,1,99,0
+D,DAC,2,99,0
+D,SW,WARN,DAC,IGNORED
+D,SW,START
+```
+
+This warning is expected when `CELLQ_REQUIRE_DAC_ACK=0`. It confirms that the procedure is continuing for GUI testing even though neither DAC acknowledged the commands.
 
 ### Pausing and continuing
 
