@@ -9,15 +9,19 @@ This guide describes the USB serial debug messages currently produced by the Cel
 - Line ending: any setting is acceptable because the firmware does not read debug commands
 - Debug switch: `CELLQ_DEBUG` at the top of `include/BuildConfig.h`
 - DAC acknowledgment policy: `CELLQ_REQUIRE_DAC_ACK` immediately below it
+- Monitor sensor source: `CELLQ_VIRTUAL_PRESSURE_SENSORS` in `include/BuildConfig.h`
 
 ```cpp
 #define CELLQ_DEBUG 1
 #define CELLQ_REQUIRE_DAC_ACK 0
+#define CELLQ_VIRTUAL_PRESSURE_SENSORS 1
 ```
 
 Use `1` to enable messages. Use `0` to compile out the debug calls and their text.
 
 For `CELLQ_REQUIRE_DAC_ACK`, use `0` during display-only bench testing so the Square-wave procedure can run without physical DACs. Set it to `1` when the DACs are installed so a missing acknowledgment changes the procedure to ERROR. The firmware attempts the I2C writes in both modes.
+
+Set `CELLQ_VIRTUAL_PRESSURE_SENSORS` to `1` for display-only testing. Set it to `0` when the six physical sensors are connected.
 
 Debug output is best-effort. A message is skipped when there is not enough room in the serial transmit buffer, so debugging cannot block important firmware work.
 
@@ -34,7 +38,11 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,V,<channel>,<state>` | A physical valve output command was issued. |
 | `D,TO,<channel>` | A timed valve reached its duration and was automatically switched off. |
 | `D,M,SYNC` | The current Manual-mode pressure and time values were sent to the LCD labels. |
+| `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
+| `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
+| `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
 | `D,SW,LOAD,1` | Factory Square-wave preset 1 was loaded on Form 2. |
+| `D,SW,READY` | All preset fields and the Scope0 preview were sent; UserImages13 was changed to image 1. |
 | `D,SW,START` | The Square-wave procedure started. |
 | `D,SW,PAUSE` | The Square-wave procedure paused with outputs preserved. |
 | `D,SW,RESUME` | The paused Square-wave procedure resumed. |
@@ -42,6 +50,7 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,DONE` | The configured total cycle count completed. |
 | `D,SW,WARN,DAC,IGNORED` | A DAC did not acknowledge, but the procedure continued because DAC acknowledgment enforcement is disabled. |
 | `D,SW,ERR,DAC` | A regulator DAC command failed while starting the procedure. |
+| `D,SW,ERR,PRESET` | A preset failed the firmware pressure, frequency, or duty validation before starting. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
 
@@ -83,13 +92,28 @@ This message shows that the firmware received an event. It does not by itself me
 
 The numeric `cmd` and `object` fields come from the Genie library. The Workshop project must use the object types and indices above and must have the necessary Report Events enabled.
 
+Form 0 also reports activation. Moving from Manual Form 1 to Form 0 hides the Manual controls but deliberately preserves its current outputs and valve timers. Operational events received while Form 1 is hidden are logged as `D,E,...` but are ignored by Manual mode.
+
 ### Current Square-wave event indices
 
 | LCD object | Index | Function |
 |---|---:|---|
-| Form | 2 | Load factory preset 1 and synchronize the Square-wave page |
+| Form | 0 | Home page navigation report |
+| Form | 2 | Load factory preset 1 when idle, or synchronize the current Square-wave state |
+| Form | 3 | Square-wave monitor page navigation report |
 | Userbutton | 27 | Start or stop the procedure |
 | Userbutton | 28 | Pause or continue the procedure |
+
+### Current monitor event indices
+
+| LCD object | Index | Function |
+|---|---:|---|
+| Form | 3 | Activate channel-pressure monitoring |
+| ILabelB | 8-13 | Pressure values for channels 1-6; firmware output only |
+| UserImages | 0-5 | Not-running, active, or suppressed channel state; firmware output only |
+| Scope | 1-6 | Real-time pressure traces for channels 1-6; firmware output only |
+
+Any reported activation of another form disables monitor sampling and writes.
 
 ## Queue overflow message
 
@@ -142,6 +166,24 @@ Fields:
 The pressure magnitude maps linearly from `0-82 kPa` to DAC code `0-4095`. For example, `-80.0 kPa` produces code `3995`. Commands update the DAC register only and do not write its EEPROM.
 
 An acknowledged I2C transmission confirms communication with a device at the configured address. It does not independently confirm the resulting analog voltage or pneumatic pressure.
+
+## Monitor-pressure message
+
+```text
+D,MON,P,<channel>,<tenths>
+```
+
+Example:
+
+```text
+D,MON,P,2,-21
+```
+
+This means channel 2 measured `-2.1 kPa` and that value was sent to ILabelB9. Messages follow the 2 Hz label rate, not the faster scope-sample rate. They stop when Form 3 is hidden.
+
+All channels currently use the legacy 0.5-4.5 V, +/-15 psi conversion with the default 5 V ADC reference. Separate fixed-point gain and offset entries exist in `BuildConfig.h` for later individual calibration. The values are measurements only; they are not currently used for feedback control or a safety interlock.
+
+When virtual sensors are enabled, an active preset channel reports its assigned preset pressure while its valve output is ON and `0.0 kPa` while OFF. Suppressed channels and inactive tests report `0.0 kPa`. The source message printed on Form 3 activation confirms which path is active.
 
 ## Time-setting message
 
@@ -238,9 +280,22 @@ D,M,SYNC
 ```text
 D,E,<cmd>,<form-object>,2,<value>
 D,SW,LOAD,1
+D,SW,READY
 ```
 
-Preset labels and images are then written once in staged updates. Scope0 receives its static preview once after page synchronization.
+UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by the static Scope0 preview. `D,SW,READY` appears and UserImages13 changes to image 1 only after the final preview sample is sent. This indicates that the page data is ready; it does not verify physical hardware.
+
+### Navigating while a Square-wave procedure is active
+
+A running or paused procedure continues when the display reports Form 0, Form 1, or Form 3. These navigation events still produce their normal raw `D,E,...` record, but they do not produce `D,SW,STOP`, idle DAC commands, or Manual synchronization. Operational display events are ignored while the Square-wave procedure owns the hardware.
+
+Returning to Form 2 starts a display-only synchronization of the current procedure state. UserImages13 changes to image 0 during the staged labels and Scope0 preview, followed by:
+
+```text
+D,SW,READY
+```
+
+There is no new `D,SW,LOAD,1` during this return synchronization, and the procedure timing is not restarted. Form 0 cannot navigate directly to Form 3 in the current GUI; any route from Manual/Home to Form 3 passes through Form 2, which safely deactivates Manual mode before the monitor page is reached.
 
 ### Starting and completing factory preset 1
 
@@ -274,6 +329,8 @@ D,SW,RESUME
 ```
 
 Pause keeps the current valve and regulator outputs unchanged. Resume continues from the preserved elapsed time and waveform phase.
+
+Square-wave valve edges and finite-cycle valve shutdown run inside the Timer5 interrupt, so they do not emit serial messages from the interrupt. The channel-1 built-in LED mirror is updated directly by the same interrupt. Procedure-level `D,SW,...` messages are emitted later by the main loop.
 
 ### Changing a pressure setting
 

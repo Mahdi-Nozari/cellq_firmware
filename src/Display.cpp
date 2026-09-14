@@ -24,6 +24,21 @@ uint8_t appendUnsigned(char *text, uint16_t value) {
   return count;
 }
 
+void formatSignedTenths(char *text, int16_t tenths) {
+  uint8_t pos = 0;
+  if (tenths < 0) {
+    text[pos++] = '-';
+  }
+  const uint16_t magnitude =
+      tenths < 0
+          ? static_cast<uint16_t>(-static_cast<int32_t>(tenths))
+          : static_cast<uint16_t>(tenths);
+  pos += appendUnsigned(text + pos, magnitude / 10U);
+  text[pos++] = '.';
+  text[pos++] = static_cast<char>('0' + magnitude % 10U);
+  text[pos] = '\0';
+}
+
 void onGenieEvent() {
   genieFrame frame;
   if (!genie.DequeueEvent(&frame)) {
@@ -91,18 +106,7 @@ void setManualPressureLabel(uint8_t regulator, int16_t tenths) {
     return;
   }
   char text[8];
-  uint8_t pos = 0;
-  if (tenths < 0) {
-    text[pos++] = '-';
-  }
-  const uint16_t magnitude =
-      tenths < 0
-          ? static_cast<uint16_t>(-static_cast<int32_t>(tenths))
-          : static_cast<uint16_t>(tenths);
-  pos += appendUnsigned(text + pos, magnitude / 10U);
-  text[pos++] = '.';
-  text[pos++] = static_cast<char>('0' + magnitude % 10U);
-  text[pos] = '\0';
+  formatSignedTenths(text, tenths);
   genie.WriteInhLabel(gui::MANUAL_PRESSURE_LABEL[regulator], text);
 }
 
@@ -116,9 +120,34 @@ void setManualTimeLabel(uint8_t channel, uint16_t seconds) {
   genie.WriteInhLabel(gui::MANUAL_TIME_LABEL_FIRST + channel, text);
 }
 
+void setMonitorChannelStatus(uint8_t channel, uint8_t image) {
+  if (channel >= hw::CHANNEL_COUNT || image > 2U) {
+    return;
+  }
+  genie.WriteObject(gui::USERIMAGES_OBJECT,
+                    gui::MONITOR_CHANNEL_IMAGE_FIRST + channel, image);
+}
+
+void setMonitorPressureLabel(uint8_t channel, int16_t tenths) {
+  if (channel >= hw::CHANNEL_COUNT) {
+    return;
+  }
+  char text[8];
+  formatSignedTenths(text, tenths);
+  genie.WriteInhLabel(gui::MONITOR_PRESSURE_LABEL_FIRST + channel, text);
+}
+
+void addMonitorScopeSample(uint8_t channel, uint16_t value) {
+  if (channel >= hw::CHANNEL_COUNT || value > 100U) {
+    return;
+  }
+  genie.WriteObject(gui::SCOPE_OBJECT,
+                    gui::MONITOR_SCOPE_FIRST + channel, value);
+}
+
 void setSquareLabel(uint8_t index, const char *text) {
   if (index < gui::SQUARE_NAME_LABEL ||
-      index > gui::SQUARE_ACTIVE_NAME_LABEL || text == nullptr) {
+      index > gui::SQUARE_PROGRESS_LABEL || text == nullptr) {
     return;
   }
   genie.WriteInhLabel(index, text);
@@ -138,6 +167,11 @@ void setSquareStatus(uint8_t image) {
     return;
   }
   genie.WriteObject(gui::USERIMAGES_OBJECT, gui::SQUARE_STATUS_IMAGE, image);
+}
+
+void setSquarePresetReady(bool ready) {
+  genie.WriteObject(gui::USERIMAGES_OBJECT,
+                    gui::SQUARE_PRESET_READY_IMAGE, ready ? 1 : 0);
 }
 
 void setSquareStartButton(bool stopImage) {

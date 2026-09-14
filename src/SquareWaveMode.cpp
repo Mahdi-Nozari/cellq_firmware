@@ -6,6 +6,7 @@
 #include "DisplayObjectMap.h"
 #include "HardwareConfig.h"
 #include "Regulator.h"
+#include "WaveformTimer.h"
 
 namespace {
 enum class ProcedureState : uint8_t { Idle, Running, Paused, Done, Error };
@@ -35,19 +36,21 @@ constexpr uint8_t STATUS_IDLE_IMAGE = 0;
 constexpr uint8_t STATUS_RUNNING_IMAGE = 1;
 constexpr uint8_t STATUS_DONE_IMAGE = 2;
 constexpr uint8_t STATUS_ERROR_IMAGE = 3;
-constexpr uint8_t DISPLAY_SYNC_STEP_COUNT = 19;
+constexpr uint8_t DISPLAY_SYNC_STEP_COUNT = 20;
+constexpr int16_t PROGRESS_NOT_SENT = -2;
+constexpr int16_t PROGRESS_BLANK = -1;
 
 SquareWavePreset activePreset_ = {};
 ProcedureState state_ = ProcedureState::Idle;
-bool formActive_ = false;
+bool form2Visible_ = false;
 bool presetLoaded_ = false;
-bool waveOutputOn_ = false;
 uint64_t activeElapsedMs_ = 0;
 uint32_t completedCycles_ = 0;
 uint32_t lastTickMs_ = 0;
 uint32_t lastRuntimeDisplayMs_ = 0;
 uint32_t displayedMinute_ = UINT32_MAX;
 uint32_t displayedCycles_ = UINT32_MAX;
+int16_t displayedProgress_ = PROGRESS_NOT_SENT;
 bool displaySyncPending_ = false;
 uint8_t displaySyncStep_ = 0;
 uint32_t displaySyncLastMs_ = 0;
@@ -150,24 +153,39 @@ bool procedureActive() {
          state_ == ProcedureState::Paused;
 }
 
-void applyWaveOutput(bool on) {
-  if (waveOutputOn_ == on) {
-    return;
-  }
-  waveOutputOn_ = on;
-  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    const bool channelOn = on && activePreset_.channelEnabled[channel] != 0;
-    digitalWrite(cellq::hw::VALVE_PINS[channel],
-                 channelOn ? cellq::hw::VALVE_ON : cellq::hw::VALVE_OFF);
-  }
+void idleOutputs() {
+  cellq::waveform::stop();
+  cellq::regulator::idle();
 }
 
-void idleOutputs() {
-  waveOutputOn_ = false;
-  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    digitalWrite(cellq::hw::VALVE_PINS[channel], cellq::hw::VALVE_OFF);
+bool presetValid() {
+  for (uint8_t regulator = 0; regulator < cellq::hw::REGULATOR_COUNT;
+       ++regulator) {
+    if (activePreset_.pressureTenths[regulator] <
+            cellq::config::SQUARE_PRESSURE_MIN_TENTHS ||
+        activePreset_.pressureTenths[regulator] >
+            cellq::config::SQUARE_PRESSURE_MAX_TENTHS) {
+      return false;
+    }
   }
-  cellq::regulator::idle();
+  if (activePreset_.frequencyTenthsHz >
+          cellq::config::SQUARE_FREQUENCY_MAX_TENTHS_HZ ||
+      (activePreset_.frequencyTenthsHz != 0 &&
+       activePreset_.frequencyTenthsHz <
+           cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ)) {
+    return false;
+  }
+  return activePreset_.dutyPercent <= 100U;
+}
+
+uint8_t enabledChannelMask() {
+  uint8_t mask = 0;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
+    if (activePreset_.channelEnabled[channel] != 0) {
+      mask |= static_cast<uint8_t>(1U << channel);
+    }
+  }
+  return mask;
 }
 
 void writeElapsedTime() {
@@ -187,6 +205,30 @@ void writeElapsedCycles() {
   displayedCycles_ = completedCycles_;
 }
 
+void writeProgress() {
+  int16_t progress = PROGRESS_BLANK;
+  if (state_ == ProcedureState::Running &&
+      activePreset_.totalCycles != 0) {
+    const uint64_t scaled =
+        static_cast<uint64_t>(completedCycles_) * 100ULL;
+    progress = static_cast<int16_t>(scaled / activePreset_.totalCycles);
+  }
+  if (progress == displayedProgress_) {
+    return;
+  }
+
+  char text[5];
+  if (progress == PROGRESS_BLANK) {
+    text[0] = '\0';
+  } else {
+    uint8_t pos = appendUnsigned(text, static_cast<uint16_t>(progress));
+    text[pos++] = '%';
+    text[pos] = '\0';
+  }
+  cellq::display::setSquareLabel(cellq::gui::SQUARE_PROGRESS_LABEL, text);
+  displayedProgress_ = progress;
+}
+
 void writeProcedureState() {
   cellq::display::setSquareStatus(statusImage());
   cellq::display::setSquareStartButton(procedureActive());
@@ -194,6 +236,7 @@ void writeProcedureState() {
   cellq::display::setSquareLabel(
       cellq::gui::SQUARE_ACTIVE_NAME_LABEL,
       procedureActive() ? activePreset_.name : "---");
+  writeProgress();
 }
 
 void stopProcedure(bool updateDisplay) {
@@ -212,9 +255,11 @@ void stopProcedure(bool updateDisplay) {
 void finishProcedure() {
   idleOutputs();
   state_ = ProcedureState::Done;
-  writeElapsedTime();
-  writeElapsedCycles();
-  writeProcedureState();
+  if (form2Visible_) {
+    writeElapsedTime();
+    writeElapsedCycles();
+    writeProcedureState();
+  }
   DBG_SQUARE("DONE");
 }
 
@@ -231,37 +276,15 @@ void failStart() {
 }
 #endif
 
-void updateWaveform() {
-  if (activePreset_.frequencyTenthsHz == 0) {
-    completedCycles_ = 0;
-    applyWaveOutput(false);
-    return;
-  }
-  if (activeElapsedMs_ < activePreset_.delayMs) {
-    completedCycles_ = 0;
-    applyWaveOutput(false);
-    return;
-  }
-
-  const uint64_t waveformElapsed = activeElapsedMs_ - activePreset_.delayMs;
-  const uint64_t waveformPosition =
-      waveformElapsed * activePreset_.frequencyTenthsHz;
-  const uint64_t cycles = waveformPosition / 10000ULL;
-  if (activePreset_.totalCycles != 0 &&
-      cycles >= activePreset_.totalCycles) {
-    completedCycles_ = activePreset_.totalCycles;
-    finishProcedure();
-    return;
-  }
-
-  completedCycles_ =
-      cycles > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(cycles);
-  const uint16_t phase = static_cast<uint16_t>(waveformPosition % 10000ULL);
-  const bool on = activePreset_.dutyPercent == 100U ||
-                  (activePreset_.dutyPercent != 0 &&
-                   phase < static_cast<uint16_t>(
-                               activePreset_.dutyPercent * 100U));
-  applyWaveOutput(on);
+void failPreset() {
+  idleOutputs();
+  state_ = ProcedureState::Error;
+  activeElapsedMs_ = 0;
+  completedCycles_ = 0;
+  writeElapsedTime();
+  writeElapsedCycles();
+  writeProcedureState();
+  DBG_SQUARE("ERR,PRESET");
 }
 
 void updateRuntimeDisplay(uint32_t now) {
@@ -277,11 +300,13 @@ void updateRuntimeDisplay(uint32_t now) {
   }
   if (completedCycles_ != displayedCycles_) {
     writeElapsedCycles();
+    writeProgress();
   }
 }
 
 void startProcedure(uint32_t now) {
-  if (!presetLoaded_) {
+  if (!presetLoaded_ || !presetValid()) {
+    failPreset();
     return;
   }
   const bool regulator1Ok =
@@ -302,8 +327,14 @@ void startProcedure(uint32_t now) {
   completedCycles_ = 0;
   lastTickMs_ = now;
   lastRuntimeDisplayMs_ = now;
-  applyWaveOutput(false);
-  updateWaveform();
+  const cellq::waveform::Config waveformConfig = {
+      enabledChannelMask(), activePreset_.frequencyTenthsHz,
+      activePreset_.dutyPercent, activePreset_.delayMs,
+      activePreset_.totalCycles};
+  if (!cellq::waveform::start(waveformConfig)) {
+    failPreset();
+    return;
+  }
   writeElapsedTime();
   writeElapsedCycles();
   writeProcedureState();
@@ -311,16 +342,20 @@ void startProcedure(uint32_t now) {
 }
 
 void pauseProcedure() {
+  cellq::waveform::pause();
   state_ = ProcedureState::Paused;
   cellq::display::setSquarePauseButton(true);
+  writeProgress();
   DBG_SQUARE("PAUSE");
 }
 
 void resumeProcedure(uint32_t now) {
+  cellq::waveform::resume();
   state_ = ProcedureState::Running;
   lastTickMs_ = now;
   lastRuntimeDisplayMs_ = now;
   cellq::display::setSquarePauseButton(false);
+  writeProgress();
   DBG_SQUARE("RESUME");
 }
 
@@ -417,6 +452,9 @@ void writeDisplaySyncStep() {
           cellq::gui::SQUARE_ACTIVE_NAME_LABEL,
           procedureActive() ? activePreset_.name : "---");
       break;
+    case 19:
+      writeProgress();
+      break;
     default: {
       const uint8_t channel = displaySyncStep_ - 9U;
       cellq::display::setSquareChannelEnabled(
@@ -468,7 +506,29 @@ void updateScopePreview(uint32_t now) {
   ++scopeSample_;
   if (scopeSample_ >= cellq::config::SQUARE_SCOPE_SAMPLE_COUNT) {
     scopePreviewPending_ = false;
+    if (state_ == ProcedureState::Running) {
+      const uint32_t minute =
+          static_cast<uint32_t>(activeElapsedMs_ / 60000ULL);
+      if (minute != displayedMinute_) {
+        writeElapsedTime();
+      }
+      if (completedCycles_ != displayedCycles_) {
+        writeElapsedCycles();
+        writeProgress();
+      }
+    }
+    cellq::display::setSquarePresetReady(true);
+    DBG_SQUARE("READY");
   }
+}
+
+void beginPageSync(uint32_t now) {
+  cellq::display::setSquarePresetReady(false);
+  displayedMinute_ = UINT32_MAX;
+  displayedCycles_ = UINT32_MAX;
+  displayedProgress_ = PROGRESS_NOT_SENT;
+  lastRuntimeDisplayMs_ = now;
+  startDisplaySync(now);
 }
 
 void loadFactoryPreset1(uint32_t now) {
@@ -477,10 +537,7 @@ void loadFactoryPreset1(uint32_t now) {
   state_ = ProcedureState::Idle;
   activeElapsedMs_ = 0;
   completedCycles_ = 0;
-  waveOutputOn_ = false;
-  displayedMinute_ = UINT32_MAX;
-  displayedCycles_ = UINT32_MAX;
-  startDisplaySync(now);
+  beginPageSync(now);
   DBG_SQUARE("LOAD,1");
 }
 }
@@ -488,24 +545,31 @@ void loadFactoryPreset1(uint32_t now) {
 namespace cellq {
 namespace square {
 void begin() {
+  waveform::begin();
   state_ = ProcedureState::Idle;
-  formActive_ = false;
+  form2Visible_ = false;
   presetLoaded_ = false;
+  displayedProgress_ = PROGRESS_NOT_SENT;
   displaySyncPending_ = false;
   scopePreviewPending_ = false;
 }
 
 void update(uint32_t now) {
-  if (!formActive_) {
-    return;
-  }
   if (state_ == ProcedureState::Running) {
     activeElapsedMs_ += static_cast<uint32_t>(now - lastTickMs_);
     lastTickMs_ = now;
-    updateWaveform();
-    if (state_ == ProcedureState::Running) {
+    completedCycles_ = waveform::completedCycles();
+    if (waveform::takeFinished()) {
+      completedCycles_ = waveform::completedCycles();
+      activeElapsedMs_ = totalTimeMs();
+      finishProcedure();
+    } else if (form2Visible_ &&
+        !displaySyncPending_ && !scopePreviewPending_) {
       updateRuntimeDisplay(now);
     }
+  }
+  if (!form2Visible_) {
+    return;
   }
   updateDisplaySync(now);
   updateScopePreview(now);
@@ -514,19 +578,21 @@ void update(uint32_t now) {
 void handleDisplayEvent(const display::Event &event, uint32_t now) {
   if (event.object == gui::FORM_OBJECT) {
     if (event.index == gui::SQUARE_FORM) {
-      if (!formActive_) {
-        formActive_ = true;
+      form2Visible_ = true;
+      if (procedureActive() || state_ == ProcedureState::Done ||
+          state_ == ProcedureState::Error) {
+        beginPageSync(now);
+      } else {
         loadFactoryPreset1(now);
       }
-    } else if (formActive_) {
-      stopProcedure(false);
-      formActive_ = false;
+    } else {
+      form2Visible_ = false;
       displaySyncPending_ = false;
       scopePreviewPending_ = false;
     }
     return;
   }
-  if (!formActive_ || event.object != gui::USERBUTTON_OBJECT ||
+  if (!form2Visible_ || event.object != gui::USERBUTTON_OBJECT ||
       event.value > 1U) {
     return;
   }
@@ -545,6 +611,25 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
       resumeProcedure(now);
     }
   }
+}
+
+bool isProcedureActive() {
+  return procedureActive();
+}
+
+bool isChannelEnabled(uint8_t channel) {
+  return presetLoaded_ && channel < hw::CHANNEL_COUNT &&
+         activePreset_.channelEnabled[channel] != 0;
+}
+
+int16_t channelPressureTenths(uint8_t channel) {
+  if (!presetLoaded_ || channel >= hw::CHANNEL_COUNT) {
+    return 0;
+  }
+  const uint8_t regulator = hw::CHANNEL_TO_REGULATOR[channel];
+  return regulator < hw::REGULATOR_COUNT
+             ? activePreset_.pressureTenths[regulator]
+             : 0;
 }
 }
 }

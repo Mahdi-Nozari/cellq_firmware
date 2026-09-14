@@ -14,6 +14,7 @@ uint16_t activeTimeSeconds_[cellq::hw::CHANNEL_COUNT] = {};
 uint32_t valveStartedMs_[cellq::hw::CHANNEL_COUNT] = {};
 bool valveOn_[cellq::hw::CHANNEL_COUNT] = {};
 bool active_ = false;
+bool formVisible_ = false;
 
 void refreshLabels() {
   for (uint8_t regulator = 0; regulator < cellq::hw::REGULATOR_COUNT;
@@ -38,14 +39,19 @@ void idleOutputs() {
 }
 
 void activate() {
+  const bool wasActive = active_;
   active_ = true;
-  for (uint8_t output = 0; output < cellq::hw::REGULATOR_COUNT; ++output) {
-    cellq::regulator::setPressureTenths(output, pressureTenths_[output]);
+  formVisible_ = true;
+  if (!wasActive) {
+    for (uint8_t output = 0; output < cellq::hw::REGULATOR_COUNT; ++output) {
+      cellq::regulator::setPressureTenths(output, pressureTenths_[output]);
+    }
   }
   refreshLabels();
 }
 
 void deactivate() {
+  formVisible_ = false;
   if (!active_) {
     return;
   }
@@ -106,6 +112,7 @@ namespace cellq {
 namespace manual {
 void begin() {
   active_ = false;
+  formVisible_ = false;
   for (uint8_t regulator = 0; regulator < hw::REGULATOR_COUNT;
        ++regulator) {
     pressureTenths_[regulator] = config::MANUAL_PRESSURE_DEFAULT_TENTHS;
@@ -136,7 +143,9 @@ void update(uint32_t now) {
       continue;
     }
     setValve(channel, false, now);
-    display::setManualSwitch(channel, false);
+    if (formVisible_) {
+      display::setManualSwitch(channel, false);
+    }
     DBG_TIMEOUT(channel + 1U);
   }
 }
@@ -145,12 +154,14 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   if (event.object == gui::FORM_OBJECT) {
     if (event.index == gui::MANUAL_FORM) {
       activate();
+    } else if (event.index == gui::HOME_FORM) {
+      formVisible_ = false;
     } else {
       deactivate();
     }
     return;
   }
-  if (!active_) {
+  if (!active_ || !formVisible_) {
     return;
   }
   if (event.object == gui::ISWITCH_OBJECT &&
