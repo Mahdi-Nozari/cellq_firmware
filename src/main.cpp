@@ -4,6 +4,7 @@
 #include "HardwareConfig.h"
 #include "ManualMode.h"
 #include "MonitorMode.h"
+#include "PresetStore.h"
 #include "SquareWaveMode.h"
 
 namespace {
@@ -41,6 +42,7 @@ void setup() {
   cellq::square::begin();
   cellq::monitor::begin();
   cellq::display::begin();
+  cellq::preset::begin();
   DBG_BOOT();
 }
 

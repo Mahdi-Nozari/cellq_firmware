@@ -111,6 +111,38 @@
     }                                                                         \
   } while (0)
 
+#define DBG_SD_OK()                                                           \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 10) {                                   \
+      Serial.println(F("D,SD,OK"));                                          \
+    }                                                                         \
+  } while (0)
+
+#define DBG_SD_FAIL()                                                         \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 12) {                                   \
+      Serial.println(F("D,SD,FAIL"));                                        \
+    }                                                                         \
+  } while (0)
+
+#define DBG_PRESET_LOAD(i, r)                                                 \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 30) {                                   \
+      Serial.print(F("D,PR,LOAD,"));                                         \
+      Serial.print(i);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(r);                                                      \
+    }                                                                         \
+  } while (0)
+
+#define DBG_PRESET_ERROR(code)                                                \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 24) {                                   \
+      Serial.print(F("D,PR,ERR,1,"));                                        \
+      Serial.println(F(code));                                                \
+    }                                                                         \
+  } while (0)
+
 #define DBG_SQUARE(message)                                                   \
   do {                                                                        \
     if (Serial.availableForWrite() >= 24) {                                   \
@@ -131,5 +163,9 @@
 #define DBG_MANUAL_SYNC() do { } while (0)
 #define DBG_MONITOR_PRESSURE(c, v) do { } while (0)
 #define DBG_MONITOR_SOURCE(message) do { } while (0)
+#define DBG_SD_OK() do { } while (0)
+#define DBG_SD_FAIL() do { } while (0)
+#define DBG_PRESET_LOAD(i, r) do { } while (0)
+#define DBG_PRESET_ERROR(code) do { } while (0)
 #define DBG_SQUARE(message) do { } while (0)
 #endif

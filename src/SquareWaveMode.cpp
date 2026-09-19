@@ -5,24 +5,16 @@
 #include "Debug.h"
 #include "DisplayObjectMap.h"
 #include "HardwareConfig.h"
+#include "PresetStore.h"
 #include "Regulator.h"
+#include "SquareWavePreset.h"
 #include "WaveformTimer.h"
 
 namespace {
 enum class ProcedureState : uint8_t { Idle, Running, Paused, Done, Error };
 
-struct SquareWavePreset {
-  uint16_t id;
-  char name[21];
-  int16_t pressureTenths[2];
-  uint8_t channelEnabled[cellq::hw::CHANNEL_COUNT];
-  uint16_t frequencyTenthsHz;
-  uint8_t dutyPercent;
-  uint16_t delayMs;
-  uint32_t totalCycles;
-};
-
-const SquareWavePreset FACTORY_PRESET_1 PROGMEM = {
+const cellq::SquareWavePreset FACTORY_PRESET_1 PROGMEM = {
+    1,
     1,
     "default preset 1",
     {-20, -20},
@@ -40,7 +32,7 @@ constexpr uint8_t DISPLAY_SYNC_STEP_COUNT = 20;
 constexpr int16_t PROGRESS_NOT_SENT = -2;
 constexpr int16_t PROGRESS_BLANK = -1;
 
-SquareWavePreset activePreset_ = {};
+cellq::SquareWavePreset activePreset_ = {};
 ProcedureState state_ = ProcedureState::Idle;
 bool form2Visible_ = false;
 bool presetLoaded_ = false;
@@ -175,7 +167,8 @@ bool presetValid() {
            cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ)) {
     return false;
   }
-  return activePreset_.dutyPercent <= 100U;
+  return activePreset_.dutyPercent <= 100U &&
+         activePreset_.delayMs <= cellq::config::SQUARE_DELAY_MAX_MS;
 }
 
 uint8_t enabledChannelMask() {
@@ -531,14 +524,24 @@ void beginPageSync(uint32_t now) {
   startDisplaySync(now);
 }
 
-void loadFactoryPreset1(uint32_t now) {
-  memcpy_P(&activePreset_, &FACTORY_PRESET_1, sizeof(activePreset_));
+void loadPreset1(uint32_t now) {
+  bool loadedFromSd = false;
+#if CELLQ_LOAD_FACTORY_PRESET_FROM_SD
+  loadedFromSd = cellq::preset::loadFactoryPreset1(activePreset_);
+#endif
+  if (!loadedFromSd) {
+    memcpy_P(&activePreset_, &FACTORY_PRESET_1, sizeof(activePreset_));
+  }
   presetLoaded_ = true;
   state_ = ProcedureState::Idle;
   activeElapsedMs_ = 0;
   completedCycles_ = 0;
   beginPageSync(now);
-  DBG_SQUARE("LOAD,1");
+  if (loadedFromSd) {
+    DBG_SQUARE("LOAD,1,SD");
+  } else {
+    DBG_SQUARE("LOAD,1,FLASH");
+  }
 }
 }
 
@@ -583,7 +586,7 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
           state_ == ProcedureState::Error) {
         beginPageSync(now);
       } else {
-        loadFactoryPreset1(now);
+        loadPreset1(now);
       }
     } else {
       form2Visible_ = false;

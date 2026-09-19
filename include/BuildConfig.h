@@ -3,6 +3,7 @@
 #define CELLQ_REQUIRE_DAC_ACK 0
 #define CELLQ_MIRROR_CHANNEL_1_TO_LED 1
 #define CELLQ_VIRTUAL_PRESSURE_SENSORS 1
+#define CELLQ_LOAD_FACTORY_PRESET_FROM_SD 1
 
 #include <stdint.h>
 
@@ -24,6 +25,11 @@
 #error CELLQ_VIRTUAL_PRESSURE_SENSORS must be 0 or 1
 #endif
 
+#if CELLQ_LOAD_FACTORY_PRESET_FROM_SD != 0 && \
+    CELLQ_LOAD_FACTORY_PRESET_FROM_SD != 1
+#error CELLQ_LOAD_FACTORY_PRESET_FROM_SD must be 0 or 1
+#endif
+
 namespace cellq {
 namespace config {
 constexpr uint32_t DEBUG_BAUD = 250000UL;
@@ -43,6 +49,8 @@ constexpr int16_t SQUARE_PRESSURE_MIN_TENTHS = -100;
 constexpr int16_t SQUARE_PRESSURE_MAX_TENTHS = 0;
 constexpr uint16_t SQUARE_FREQUENCY_MIN_TENTHS_HZ = 1U;
 constexpr uint16_t SQUARE_FREQUENCY_MAX_TENTHS_HZ = 100U;
+constexpr uint16_t SQUARE_DELAY_MAX_MS = 10000U;
+constexpr uint8_t PRESET_LINE_BUFFER_SIZE = 96U;
 constexpr uint16_t SQUARE_DISPLAY_WRITE_INTERVAL_MS = 10U;
 constexpr uint16_t SQUARE_RUNTIME_DISPLAY_INTERVAL_MS = 1000U;
 constexpr uint16_t SQUARE_SCOPE_SAMPLE_COUNT = 100U;

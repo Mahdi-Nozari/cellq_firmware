@@ -10,11 +10,13 @@ This guide describes the USB serial debug messages currently produced by the Cel
 - Debug switch: `CELLQ_DEBUG` at the top of `include/BuildConfig.h`
 - DAC acknowledgment policy: `CELLQ_REQUIRE_DAC_ACK` immediately below it
 - Monitor sensor source: `CELLQ_VIRTUAL_PRESSURE_SENSORS` in `include/BuildConfig.h`
+- Factory preset 1 source: `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` in `include/BuildConfig.h`
 
 ```cpp
 #define CELLQ_DEBUG 1
 #define CELLQ_REQUIRE_DAC_ACK 0
 #define CELLQ_VIRTUAL_PRESSURE_SENSORS 1
+#define CELLQ_LOAD_FACTORY_PRESET_FROM_SD 1
 ```
 
 Use `1` to enable messages. Use `0` to compile out the debug calls and their text.
@@ -22,6 +24,8 @@ Use `1` to enable messages. Use `0` to compile out the debug calls and their tex
 For `CELLQ_REQUIRE_DAC_ACK`, use `0` during display-only bench testing so the Square-wave procedure can run without physical DACs. Set it to `1` when the DACs are installed so a missing acknowledgment changes the procedure to ERROR. The firmware attempts the I2C writes in both modes.
 
 Set `CELLQ_VIRTUAL_PRESSURE_SENSORS` to `1` for display-only testing. Set it to `0` when the six physical sensors are connected.
+
+Set `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` to `1` to try `/PRESETS/FCTRY1.CSV` when idle Form 2 opens. Set it to `0` to always use the compiled factory preset. A failed SD load also falls back automatically.
 
 Debug output is best-effort. A message is skipped when there is not enough room in the serial transmit buffer, so debugging cannot block important firmware work.
 
@@ -41,7 +45,12 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
 | `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
 | `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
-| `D,SW,LOAD,1` | Factory Square-wave preset 1 was loaded on Form 2. |
+| `D,SD,OK` | SD card initialization on D10 succeeded at boot. |
+| `D,SD,FAIL` | SD card initialization failed; the compiled preset remains available. |
+| `D,PR,LOAD,<id>,<revision>` | The SD preset passed all parsing, range, and CRC checks. |
+| `D,PR,ERR,1,<code>` | SD preset 1 could not be loaded; see the error-code table below. |
+| `D,SW,LOAD,1,SD` | Square-wave preset 1 was committed from the SD file. |
+| `D,SW,LOAD,1,FLASH` | The compiled factory preset 1 fallback was loaded. |
 | `D,SW,READY` | All preset fields and the Scope0 preview were sent; UserImages13 was changed to image 1. |
 | `D,SW,START` | The Square-wave procedure started. |
 | `D,SW,PAUSE` | The Square-wave procedure paused with outputs preserved. |
@@ -53,6 +62,20 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,ERR,PRESET` | A preset failed the firmware pressure, frequency, or duty validation before starting. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
+
+### Preset error codes
+
+| Code | Meaning |
+|---|---|
+| `SD` | SD initialization was unavailable at boot. |
+| `OPEN` | `/PRESETS/FCTRY1.CSV` could not be opened. |
+| `LONG` | A CSV line exceeded the fixed 96-byte buffer. |
+| `SIG` | The `CELLQ_SW` signature was wrong. |
+| `VER` | The file schema version is unsupported. |
+| `RANGE` | A numeric value was outside its permitted range. |
+| `CHANNEL` | The channel count or ordered channel number was wrong. |
+| `CRC` | The calculated CRC32 did not match the file. |
+| `FIELD` | A record, timestamp, name, field count, or shared waveform value was invalid. |
 
 ## Boot message
 
@@ -279,11 +302,14 @@ D,M,SYNC
 
 ```text
 D,E,<cmd>,<form-object>,2,<value>
-D,SW,LOAD,1
+D,PR,LOAD,1,1
+D,SW,LOAD,1,SD
 D,SW,READY
 ```
 
-UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by the static Scope0 preview. `D,SW,READY` appears and UserImages13 changes to image 1 only after the final preview sample is sent. This indicates that the page data is ready; it does not verify physical hardware.
+This is the successful SD sequence for revision 1. UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by the static Scope0 preview. `D,SW,READY` appears and UserImages13 changes to image 1 only after the final preview sample is sent. This indicates that the page data is ready; it does not verify physical hardware.
+
+If the SD file is unavailable or invalid, `D,PR,ERR,1,<code>` and `D,SW,LOAD,1,FLASH` appear instead. The page still loads the compiled preset and becomes ready.
 
 ### Navigating while a Square-wave procedure is active
 
