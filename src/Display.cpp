@@ -11,6 +11,12 @@ cellq::display::Event eventQueue[cellq::config::DISPLAY_EVENT_QUEUE_SIZE];
 uint8_t queueHead = 0;
 uint8_t queueTail = 0;
 
+static_assert(cellq::gui::PRESET_SELECT_NAME_LABEL_LAST -
+                      cellq::gui::PRESET_SELECT_NAME_LABEL_FIRST +
+                  1U ==
+              cellq::config::SQUARE_PRESET_SLOT_COUNT,
+              "Preset selector label count must match preset slots");
+
 uint8_t appendUnsigned(char *text, uint16_t value) {
   char reverse[5];
   uint8_t count = 0;
@@ -147,7 +153,7 @@ void addMonitorScopeSample(uint8_t channel, uint16_t value) {
 
 void setSquareLabel(uint8_t index, const char *text) {
   if (index < gui::SQUARE_NAME_LABEL ||
-      index > gui::SQUARE_PROGRESS_LABEL || text == nullptr) {
+      index > gui::SQUARE_GROUP_1_DELAY_LABEL || text == nullptr) {
     return;
   }
   genie.WriteInhLabel(index, text);
@@ -184,8 +190,29 @@ void setSquarePauseButton(bool continueImage) {
                     continueImage ? 1 : 0);
 }
 
-void addSquareScopeSample(uint16_t value) {
-  genie.WriteObject(gui::SCOPE_OBJECT, gui::SQUARE_SCOPE, value);
+void setSquarePauseAtCycleSwitch(bool enabled) {
+  genie.WriteObject(gui::ISWITCH_OBJECT,
+                    gui::SQUARE_PAUSE_AT_CYCLE_SWITCH,
+                    enabled ? 1 : 0);
+}
+
+void addSquareScopeSample(uint8_t group, uint16_t value) {
+  if (group >= hw::REGULATOR_COUNT || value > 100U) {
+    return;
+  }
+  genie.WriteObject(gui::SCOPE_OBJECT, gui::SQUARE_GROUP_SCOPE[group],
+                    value);
+}
+
+void setPresetSelectName(uint8_t slot, const char *text) {
+  if (slot >= config::SQUARE_PRESET_SLOT_COUNT || text == nullptr) {
+    return;
+  }
+  genie.WriteInhLabel(gui::PRESET_SELECT_NAME_LABEL_FIRST + slot, text);
+}
+
+void activateForm(uint8_t form) {
+  genie.WriteObject(gui::FORM_OBJECT, form, 0);
 }
 }
 }

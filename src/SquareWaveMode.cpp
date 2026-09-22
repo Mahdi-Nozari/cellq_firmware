@@ -11,44 +11,81 @@
 #include "WaveformTimer.h"
 
 namespace {
-enum class ProcedureState : uint8_t { Idle, Running, Paused, Done, Error };
+enum class ProcedureState : uint8_t {
+  Idle,
+  Running,
+  PausePending,
+  Paused,
+  Done,
+  Error
+};
 
+constexpr uint8_t GROUP_COUNT = cellq::hw::REGULATOR_COUNT;
 const cellq::SquareWavePreset FACTORY_PRESET_1 PROGMEM = {
     1,
     1,
     "default preset 1",
     {-20, -20},
     {1, 1, 0, 1, 1, 0},
-    10,
-    50,
-    0,
-    30};
+    {10, 10},
+    {50, 50},
+    {0, 0},
+    {30, 30}};
+const cellq::SquareWavePreset FACTORY_PRESET_2 PROGMEM = {
+    2,
+    1,
+    "default preset 2",
+    {-25, -30},
+    {1, 1, 0, 1, 1, 0},
+    {10, 8},
+    {40, 60},
+    {500, 1000},
+    {25, 20}};
 
 constexpr uint8_t STATUS_IDLE_IMAGE = 0;
 constexpr uint8_t STATUS_RUNNING_IMAGE = 1;
 constexpr uint8_t STATUS_DONE_IMAGE = 2;
 constexpr uint8_t STATUS_ERROR_IMAGE = 3;
-constexpr uint8_t DISPLAY_SYNC_STEP_COUNT = 20;
+constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 24;
+constexpr uint8_t RUNTIME_DISPLAY_SYNC_STEP_COUNT = 9;
 constexpr int16_t PROGRESS_NOT_SENT = -2;
 constexpr int16_t PROGRESS_BLANK = -1;
+constexpr char UNAVAILABLE_PRESET_NAME[] = "---";
+static_assert(cellq::gui::PRESET_SELECT_BUTTON_LAST -
+                      cellq::gui::PRESET_SELECT_BUTTON_FIRST +
+                  1U ==
+              cellq::config::SQUARE_PRESET_SLOT_COUNT,
+              "Preset selector button count must match preset slots");
 
 cellq::SquareWavePreset activePreset_ = {};
 ProcedureState state_ = ProcedureState::Idle;
 bool form2Visible_ = false;
+bool presetSelectVisible_ = false;
 bool presetLoaded_ = false;
-uint64_t activeElapsedMs_ = 0;
-uint32_t completedCycles_ = 0;
-uint32_t lastTickMs_ = 0;
-uint32_t lastRuntimeDisplayMs_ = 0;
-uint32_t displayedMinute_ = UINT32_MAX;
-uint32_t displayedCycles_ = UINT32_MAX;
+bool presetPageSynchronized_ = false;
+bool pauseAtCycleBoundary_ = false;
+uint8_t progressGroup_ = 0;
+uint32_t completedCycles_[GROUP_COUNT] = {};
+uint64_t remainingTimeMs_[GROUP_COUNT] = {};
+uint32_t displayedMinute_[GROUP_COUNT] = {UINT32_MAX, UINT32_MAX};
+uint32_t displayedRemainingCycles_[GROUP_COUNT] = {UINT32_MAX, UINT32_MAX};
 int16_t displayedProgress_ = PROGRESS_NOT_SENT;
+uint32_t lastRuntimeDisplayMs_ = 0;
 bool displaySyncPending_ = false;
+bool fullDisplaySync_ = false;
 uint8_t displaySyncStep_ = 0;
 uint32_t displaySyncLastMs_ = 0;
 bool scopePreviewPending_ = false;
+uint8_t scopePreviewGroup_ = 0;
 uint16_t scopeSample_ = 0;
 uint32_t scopeLastWriteMs_ = 0;
+char presetNames_[cellq::config::SQUARE_PRESET_SLOT_COUNT][21] = {};
+bool presetAvailable_[cellq::config::SQUARE_PRESET_SLOT_COUNT] = {};
+bool presetListCached_ = false;
+bool presetListScanPending_ = false;
+bool presetListWritePending_ = false;
+uint8_t presetListSlot_ = 0;
+uint32_t presetListLastWriteMs_ = 0;
 
 uint8_t appendUnsigned(char *text, uint32_t value) {
   char reverse[10];
@@ -57,47 +94,47 @@ uint8_t appendUnsigned(char *text, uint32_t value) {
     reverse[count++] = static_cast<char>('0' + value % 10UL);
     value /= 10UL;
   } while (value > 0);
-  for (uint8_t i = 0; i < count; ++i) {
-    text[i] = reverse[count - 1U - i];
+  for (uint8_t index = 0; index < count; ++index) {
+    text[index] = reverse[count - 1U - index];
   }
   return count;
 }
 
 void formatSignedTenths(char *text, int16_t tenths) {
-  uint8_t pos = 0;
+  uint8_t position = 0;
   if (tenths < 0) {
-    text[pos++] = '-';
+    text[position++] = '-';
   }
   const uint16_t magnitude =
       tenths < 0
           ? static_cast<uint16_t>(-static_cast<int32_t>(tenths))
           : static_cast<uint16_t>(tenths);
-  pos += appendUnsigned(text + pos, magnitude / 10U);
-  text[pos++] = '.';
-  text[pos++] = static_cast<char>('0' + magnitude % 10U);
-  text[pos] = '\0';
+  position += appendUnsigned(text + position, magnitude / 10U);
+  text[position++] = '.';
+  text[position++] = static_cast<char>('0' + magnitude % 10U);
+  text[position] = '\0';
 }
 
 void formatUnsignedTenths(char *text, uint16_t tenths) {
-  uint8_t pos = appendUnsigned(text, tenths / 10U);
-  text[pos++] = '.';
-  text[pos++] = static_cast<char>('0' + tenths % 10U);
-  text[pos] = '\0';
+  uint8_t position = appendUnsigned(text, tenths / 10U);
+  text[position++] = '.';
+  text[position++] = static_cast<char>('0' + tenths % 10U);
+  text[position] = '\0';
 }
 
 void formatHundredths(char *text, uint32_t hundredths) {
-  uint8_t pos = appendUnsigned(text, hundredths / 100UL);
+  uint8_t position = appendUnsigned(text, hundredths / 100UL);
   const uint8_t fraction = hundredths % 100UL;
-  if (fraction == 0) {
-    text[pos] = '\0';
+  if (fraction == 0U) {
+    text[position] = '\0';
     return;
   }
-  text[pos++] = '.';
-  text[pos++] = static_cast<char>('0' + fraction / 10U);
-  if (fraction % 10U != 0) {
-    text[pos++] = static_cast<char>('0' + fraction % 10U);
+  text[position++] = '.';
+  text[position++] = static_cast<char>('0' + fraction / 10U);
+  if (fraction % 10U != 0U) {
+    text[position++] = static_cast<char>('0' + fraction % 10U);
   }
-  text[pos] = '\0';
+  text[position] = '\0';
 }
 
 void formatHoursMinutes(char *text, uint64_t milliseconds) {
@@ -105,30 +142,137 @@ void formatHoursMinutes(char *text, uint64_t milliseconds) {
       static_cast<uint32_t>(milliseconds / 60000ULL);
   const uint32_t hours = totalMinutes / 60UL;
   const uint8_t minutes = totalMinutes % 60UL;
-  uint8_t pos = 0;
+  uint8_t position = 0;
   if (hours < 10UL) {
-    text[pos++] = '0';
+    text[position++] = '0';
   }
-  pos += appendUnsigned(text + pos, hours);
-  text[pos++] = ':';
-  text[pos++] = static_cast<char>('0' + minutes / 10U);
-  text[pos++] = static_cast<char>('0' + minutes % 10U);
-  text[pos] = '\0';
+  position += appendUnsigned(text + position, hours);
+  text[position++] = ':';
+  text[position++] = static_cast<char>('0' + minutes / 10U);
+  text[position++] = static_cast<char>('0' + minutes % 10U);
+  text[position] = '\0';
 }
 
-uint64_t totalTimeMs() {
-  if (activePreset_.frequencyTenthsHz == 0 ||
-      activePreset_.totalCycles == 0) {
-    return 0;
+uint64_t configuredTimeMs(uint8_t group) {
+  if (activePreset_.frequencyTenthsHz[group] == 0U ||
+      activePreset_.totalCycles[group] == 0U) {
+    return UINT64_MAX;
   }
-  return activePreset_.delayMs +
-         static_cast<uint64_t>(activePreset_.totalCycles) * 10000ULL /
-             activePreset_.frequencyTenthsHz;
+  return activePreset_.delayMs[group] +
+         static_cast<uint64_t>(activePreset_.totalCycles[group]) *
+             10000ULL / activePreset_.frequencyTenthsHz[group];
+}
+
+uint32_t remainingCycles(uint8_t group) {
+  if (activePreset_.totalCycles[group] == 0U) {
+    return UINT32_MAX;
+  }
+  return completedCycles_[group] < activePreset_.totalCycles[group]
+             ? activePreset_.totalCycles[group] - completedCycles_[group]
+             : 0U;
+}
+
+void resetCountdowns() {
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    completedCycles_[group] = 0;
+    remainingTimeMs_[group] = configuredTimeMs(group);
+  }
+  const uint64_t group1Time = configuredTimeMs(0);
+  const uint64_t group2Time = configuredTimeMs(1);
+  progressGroup_ = group2Time > group1Time ? 1U : 0U;
+}
+
+void copyFactoryPreset(uint16_t id, cellq::SquareWavePreset &preset) {
+  const cellq::SquareWavePreset *source =
+      id == 2U ? &FACTORY_PRESET_2 : &FACTORY_PRESET_1;
+  memcpy_P(&preset, source, sizeof(preset));
+}
+
+bool findPresetForList(uint16_t id, cellq::SquareWavePreset &preset) {
+  if (id <= 2U) {
+#if CELLQ_LOAD_FACTORY_PRESET_FROM_SD
+    if (cellq::preset::findPreset(id, preset)) {
+      return true;
+    }
+#endif
+    copyFactoryPreset(id, preset);
+    return true;
+  }
+  return cellq::preset::findPreset(id, preset);
+}
+
+bool loadSelectedPreset(uint16_t id, cellq::SquareWavePreset &preset) {
+  if (id <= 2U) {
+#if CELLQ_LOAD_FACTORY_PRESET_FROM_SD
+    if (cellq::preset::loadPreset(id, preset)) {
+      return true;
+    }
+#endif
+    copyFactoryPreset(id, preset);
+    DBG_PRESET_FLASH(id);
+    return true;
+  }
+  return cellq::preset::loadPreset(id, preset);
+}
+
+void beginPresetList(uint32_t now) {
+  presetListScanPending_ = !presetListCached_;
+  presetListWritePending_ = presetListCached_;
+  presetListSlot_ = 0;
+  presetListLastWriteMs_ =
+      now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
+}
+
+void scanNextPresetSlot(uint32_t now) {
+  if (!presetListScanPending_) {
+    return;
+  }
+  const uint16_t id = static_cast<uint16_t>(presetListSlot_) + 1U;
+  cellq::SquareWavePreset candidate = {};
+  presetAvailable_[presetListSlot_] = findPresetForList(id, candidate);
+  strcpy(presetNames_[presetListSlot_],
+         presetAvailable_[presetListSlot_] ? candidate.name
+                                          : UNAVAILABLE_PRESET_NAME);
+  ++presetListSlot_;
+  if (presetListSlot_ < cellq::config::SQUARE_PRESET_SLOT_COUNT) {
+    return;
+  }
+  presetListCached_ = true;
+  presetListScanPending_ = false;
+  presetListWritePending_ = true;
+  presetListSlot_ = 0;
+  presetListLastWriteMs_ =
+      now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
+}
+
+void updatePresetListDisplay(uint32_t now) {
+  if (!presetListWritePending_ ||
+      static_cast<uint32_t>(now - presetListLastWriteMs_) <
+          cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS) {
+    return;
+  }
+  presetListLastWriteMs_ = now;
+  cellq::display::setPresetSelectName(
+      presetListSlot_, presetNames_[presetListSlot_]);
+  ++presetListSlot_;
+  if (presetListSlot_ >= cellq::config::SQUARE_PRESET_SLOT_COUNT) {
+    presetListWritePending_ = false;
+    DBG_SQUARE("LIST,READY");
+  }
+}
+
+void refreshRuntimeSnapshot() {
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    completedCycles_[group] = cellq::waveform::completedCycles(group);
+    remainingTimeMs_[group] =
+        cellq::waveform::remainingMilliseconds(group);
+  }
 }
 
 uint8_t statusImage() {
   switch (state_) {
     case ProcedureState::Running:
+    case ProcedureState::PausePending:
     case ProcedureState::Paused:
       return STATUS_RUNNING_IMAGE;
     case ProcedureState::Done:
@@ -142,7 +286,13 @@ uint8_t statusImage() {
 
 bool procedureActive() {
   return state_ == ProcedureState::Running ||
+         state_ == ProcedureState::PausePending ||
          state_ == ProcedureState::Paused;
+}
+
+bool procedureAdvancing() {
+  return state_ == ProcedureState::Running ||
+         state_ == ProcedureState::PausePending;
 }
 
 void idleOutputs() {
@@ -151,72 +301,87 @@ void idleOutputs() {
 }
 
 bool presetValid() {
-  for (uint8_t regulator = 0; regulator < cellq::hw::REGULATOR_COUNT;
-       ++regulator) {
-    if (activePreset_.pressureTenths[regulator] <
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    if (activePreset_.pressureTenths[group] <
             cellq::config::SQUARE_PRESSURE_MIN_TENTHS ||
-        activePreset_.pressureTenths[regulator] >
-            cellq::config::SQUARE_PRESSURE_MAX_TENTHS) {
+        activePreset_.pressureTenths[group] >
+            cellq::config::SQUARE_PRESSURE_MAX_TENTHS ||
+        activePreset_.frequencyTenthsHz[group] >
+            cellq::config::SQUARE_FREQUENCY_MAX_TENTHS_HZ ||
+        (activePreset_.frequencyTenthsHz[group] != 0U &&
+         activePreset_.frequencyTenthsHz[group] <
+             cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ) ||
+        activePreset_.dutyPercent[group] > 100U ||
+        activePreset_.delayMs[group] >
+            cellq::config::SQUARE_DELAY_MAX_MS) {
       return false;
     }
   }
-  if (activePreset_.frequencyTenthsHz >
-          cellq::config::SQUARE_FREQUENCY_MAX_TENTHS_HZ ||
-      (activePreset_.frequencyTenthsHz != 0 &&
-       activePreset_.frequencyTenthsHz <
-           cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ)) {
-    return false;
-  }
-  return activePreset_.dutyPercent <= 100U &&
-         activePreset_.delayMs <= cellq::config::SQUARE_DELAY_MAX_MS;
+  return true;
 }
 
-uint8_t enabledChannelMask() {
+uint8_t enabledChannelMask(uint8_t group) {
   uint8_t mask = 0;
   for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    if (activePreset_.channelEnabled[channel] != 0) {
+    if (cellq::hw::CHANNEL_TO_REGULATOR[channel] == group &&
+        activePreset_.channelEnabled[channel] != 0U) {
       mask |= static_cast<uint8_t>(1U << channel);
     }
   }
   return mask;
 }
 
-void writeElapsedTime() {
+void writeRemainingTime(uint8_t group) {
   char text[16];
-  formatHoursMinutes(text, activeElapsedMs_);
-  cellq::display::setSquareLabel(cellq::gui::SQUARE_ELAPSED_TIME_LABEL,
-                                 text);
-  displayedMinute_ = static_cast<uint32_t>(activeElapsedMs_ / 60000ULL);
+  if (remainingTimeMs_[group] == UINT64_MAX) {
+    strcpy(text, "--:--");
+    displayedMinute_[group] = UINT32_MAX - 1UL;
+  } else {
+    formatHoursMinutes(text, remainingTimeMs_[group]);
+    displayedMinute_[group] =
+        static_cast<uint32_t>(remainingTimeMs_[group] / 60000ULL);
+  }
+  cellq::display::setSquareLabel(
+      cellq::gui::SQUARE_REMAINING_TIME_LABEL[group], text);
 }
 
-void writeElapsedCycles() {
+void writeRemainingCycles(uint8_t group) {
   char text[11];
-  const uint8_t length = appendUnsigned(text, completedCycles_);
-  text[length] = '\0';
-  cellq::display::setSquareLabel(cellq::gui::SQUARE_ELAPSED_CYCLES_LABEL,
-                                 text);
-  displayedCycles_ = completedCycles_;
+  const uint32_t cycles = remainingCycles(group);
+  if (cycles == UINT32_MAX) {
+    strcpy(text, "---");
+  } else {
+    const uint8_t length = appendUnsigned(text, cycles);
+    text[length] = '\0';
+  }
+  cellq::display::setSquareLabel(
+      cellq::gui::SQUARE_REMAINING_CYCLES_LABEL[group], text);
+  displayedRemainingCycles_[group] = cycles;
 }
 
 void writeProgress() {
   int16_t progress = PROGRESS_BLANK;
-  if (state_ == ProcedureState::Running &&
-      activePreset_.totalCycles != 0) {
+  const uint32_t totalCycles = activePreset_.totalCycles[progressGroup_];
+  if (procedureAdvancing() && totalCycles != 0U &&
+      activePreset_.frequencyTenthsHz[progressGroup_] != 0U) {
     const uint64_t scaled =
-        static_cast<uint64_t>(completedCycles_) * 100ULL;
-    progress = static_cast<int16_t>(scaled / activePreset_.totalCycles);
+        static_cast<uint64_t>(completedCycles_[progressGroup_]) * 100ULL;
+    progress = static_cast<int16_t>(scaled / totalCycles);
+    if (progress > 100) {
+      progress = 100;
+    }
   }
   if (progress == displayedProgress_) {
     return;
   }
-
   char text[5];
   if (progress == PROGRESS_BLANK) {
     text[0] = '\0';
   } else {
-    uint8_t pos = appendUnsigned(text, static_cast<uint16_t>(progress));
-    text[pos++] = '%';
-    text[pos] = '\0';
+    uint8_t position =
+        appendUnsigned(text, static_cast<uint16_t>(progress));
+    text[position++] = '%';
+    text[position] = '\0';
   }
   cellq::display::setSquareLabel(cellq::gui::SQUARE_PROGRESS_LABEL, text);
   displayedProgress_ = progress;
@@ -226,58 +391,54 @@ void writeProcedureState() {
   cellq::display::setSquareStatus(statusImage());
   cellq::display::setSquareStartButton(procedureActive());
   cellq::display::setSquarePauseButton(state_ == ProcedureState::Paused);
-  cellq::display::setSquareLabel(
-      cellq::gui::SQUARE_ACTIVE_NAME_LABEL,
-      procedureActive() ? activePreset_.name : "---");
   writeProgress();
+}
+
+void writeAllCountdowns() {
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    writeRemainingTime(group);
+    writeRemainingCycles(group);
+  }
 }
 
 void stopProcedure(bool updateDisplay) {
   idleOutputs();
   state_ = ProcedureState::Idle;
-  activeElapsedMs_ = 0;
-  completedCycles_ = 0;
+  resetCountdowns();
   if (updateDisplay) {
-    writeElapsedTime();
-    writeElapsedCycles();
+    writeAllCountdowns();
     writeProcedureState();
   }
   DBG_SQUARE("STOP");
 }
 
 void finishProcedure() {
-  idleOutputs();
+  cellq::regulator::idle();
   state_ = ProcedureState::Done;
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    completedCycles_[group] = activePreset_.totalCycles[group];
+    remainingTimeMs_[group] = 0;
+  }
   if (form2Visible_) {
-    writeElapsedTime();
-    writeElapsedCycles();
+    writeAllCountdowns();
     writeProcedureState();
   }
   DBG_SQUARE("DONE");
 }
 
-#if CELLQ_REQUIRE_DAC_ACK
-void failStart() {
+void failProcedure(bool dacFailure) {
   idleOutputs();
   state_ = ProcedureState::Error;
-  activeElapsedMs_ = 0;
-  completedCycles_ = 0;
-  writeElapsedTime();
-  writeElapsedCycles();
-  writeProcedureState();
-  DBG_SQUARE("ERR,DAC");
-}
-#endif
-
-void failPreset() {
-  idleOutputs();
-  state_ = ProcedureState::Error;
-  activeElapsedMs_ = 0;
-  completedCycles_ = 0;
-  writeElapsedTime();
-  writeElapsedCycles();
-  writeProcedureState();
-  DBG_SQUARE("ERR,PRESET");
+  resetCountdowns();
+  if (form2Visible_) {
+    writeAllCountdowns();
+    writeProcedureState();
+  }
+  if (dacFailure) {
+    DBG_SQUARE("ERR,DAC");
+  } else {
+    DBG_SQUARE("ERR,PRESET");
+  }
 }
 
 void updateRuntimeDisplay(uint32_t now) {
@@ -286,174 +447,210 @@ void updateRuntimeDisplay(uint32_t now) {
     return;
   }
   lastRuntimeDisplayMs_ = now;
-  const uint32_t minute =
-      static_cast<uint32_t>(activeElapsedMs_ / 60000ULL);
-  if (minute != displayedMinute_) {
-    writeElapsedTime();
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    const uint32_t minute =
+        remainingTimeMs_[group] == UINT64_MAX
+            ? UINT32_MAX - 1UL
+            : static_cast<uint32_t>(remainingTimeMs_[group] / 60000ULL);
+    if (minute != displayedMinute_[group]) {
+      writeRemainingTime(group);
+    }
+    const uint32_t cycles = remainingCycles(group);
+    if (cycles != displayedRemainingCycles_[group]) {
+      writeRemainingCycles(group);
+    }
   }
-  if (completedCycles_ != displayedCycles_) {
-    writeElapsedCycles();
-    writeProgress();
-  }
+  writeProgress();
 }
 
 void startProcedure(uint32_t now) {
   if (!presetLoaded_ || !presetValid()) {
-    failPreset();
+    failProcedure(false);
     return;
   }
-  const bool regulator1Ok =
-      cellq::regulator::setPressureTenths(0, activePreset_.pressureTenths[0]);
-  const bool regulator2Ok =
-      cellq::regulator::setPressureTenths(1, activePreset_.pressureTenths[1]);
-  if (!regulator1Ok || !regulator2Ok) {
+  bool regulatorsOk = true;
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    regulatorsOk = cellq::regulator::setPressureTenths(
+                       group, activePreset_.pressureTenths[group]) &&
+                   regulatorsOk;
+  }
+  if (!regulatorsOk) {
 #if CELLQ_REQUIRE_DAC_ACK
-    failStart();
+    failProcedure(true);
     return;
 #else
     DBG_SQUARE("WARN,DAC,IGNORED");
 #endif
   }
 
-  state_ = ProcedureState::Running;
-  activeElapsedMs_ = 0;
-  completedCycles_ = 0;
-  lastTickMs_ = now;
-  lastRuntimeDisplayMs_ = now;
-  const cellq::waveform::Config waveformConfig = {
-      enabledChannelMask(), activePreset_.frequencyTenthsHz,
-      activePreset_.dutyPercent, activePreset_.delayMs,
-      activePreset_.totalCycles};
+  cellq::waveform::Config waveformConfig = {};
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    waveformConfig.group[group] = {
+        enabledChannelMask(group), activePreset_.frequencyTenthsHz[group],
+        activePreset_.dutyPercent[group], activePreset_.delayMs[group],
+        activePreset_.totalCycles[group]};
+  }
   if (!cellq::waveform::start(waveformConfig)) {
-    failPreset();
+    failProcedure(false);
     return;
   }
-  writeElapsedTime();
-  writeElapsedCycles();
+  state_ = ProcedureState::Running;
+  resetCountdowns();
+  lastRuntimeDisplayMs_ = now;
+  writeAllCountdowns();
   writeProcedureState();
   DBG_SQUARE("START");
 }
 
 void pauseProcedure() {
+  if (pauseAtCycleBoundary_) {
+    cellq::waveform::pauseAtCycleBoundary();
+    state_ = ProcedureState::PausePending;
+    DBG_SQUARE("PAUSE,WAIT");
+    return;
+  }
   cellq::waveform::pause();
+  refreshRuntimeSnapshot();
   state_ = ProcedureState::Paused;
   cellq::display::setSquarePauseButton(true);
   writeProgress();
   DBG_SQUARE("PAUSE");
 }
 
+void completeBoundaryPause() {
+  refreshRuntimeSnapshot();
+  state_ = ProcedureState::Paused;
+  if (form2Visible_) {
+    writeAllCountdowns();
+    cellq::display::setSquarePauseButton(true);
+    writeProgress();
+  }
+  DBG_SQUARE("PAUSE");
+}
+
 void resumeProcedure(uint32_t now) {
   cellq::waveform::resume();
   state_ = ProcedureState::Running;
-  lastTickMs_ = now;
   lastRuntimeDisplayMs_ = now;
   cellq::display::setSquarePauseButton(false);
   writeProgress();
   DBG_SQUARE("RESUME");
 }
 
-void startDisplaySync(uint32_t now) {
+void startDisplaySync(uint32_t now, bool fullSync) {
   displaySyncPending_ = true;
+  fullDisplaySync_ = fullSync;
   displaySyncStep_ = 0;
   displaySyncLastMs_ =
       now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
   scopePreviewPending_ = false;
+  scopePreviewGroup_ = 0;
   scopeSample_ = 0;
 }
 
-void writeDisplaySyncStep() {
-  char text[24];
+void writeGroupParameter(uint8_t group, uint8_t parameter) {
+  const uint8_t labels[GROUP_COUNT][4] = {
+      {cellq::gui::SQUARE_GROUP_1_PRESSURE_LABEL,
+       cellq::gui::SQUARE_GROUP_1_FREQUENCY_LABEL,
+       cellq::gui::SQUARE_GROUP_1_ON_TIME_LABEL,
+       cellq::gui::SQUARE_GROUP_1_DELAY_LABEL},
+      {cellq::gui::SQUARE_GROUP_2_PRESSURE_LABEL,
+       cellq::gui::SQUARE_GROUP_2_FREQUENCY_LABEL,
+       cellq::gui::SQUARE_GROUP_2_ON_TIME_LABEL,
+       cellq::gui::SQUARE_GROUP_2_DELAY_LABEL}};
+  char text[16];
+  if (parameter == 0U) {
+    formatSignedTenths(text, activePreset_.pressureTenths[group]);
+  } else if (parameter == 1U) {
+    formatUnsignedTenths(text, activePreset_.frequencyTenthsHz[group]);
+  } else if (parameter == 2U) {
+    uint32_t onTimeHundredths = 0;
+    if (activePreset_.frequencyTenthsHz[group] != 0U) {
+      onTimeHundredths =
+          (static_cast<uint32_t>(activePreset_.dutyPercent[group]) * 10UL +
+           activePreset_.frequencyTenthsHz[group] / 2U) /
+          activePreset_.frequencyTenthsHz[group];
+    }
+    formatHundredths(text, onTimeHundredths);
+  } else {
+    formatHundredths(text, (activePreset_.delayMs[group] + 5UL) / 10UL);
+  }
+  cellq::display::setSquareLabel(labels[group][parameter], text);
+}
+
+void writeFullDisplaySyncStep() {
+  if (displaySyncStep_ == 0U) {
+    cellq::display::setSquareLabel(cellq::gui::SQUARE_NAME_LABEL,
+                                   activePreset_.name);
+    return;
+  }
+  if (displaySyncStep_ <= 8U) {
+    const uint8_t offset = displaySyncStep_ - 1U;
+    writeGroupParameter(offset / 4U, offset % 4U);
+    return;
+  }
+  if (displaySyncStep_ <= 10U) {
+    writeRemainingTime(displaySyncStep_ - 9U);
+    return;
+  }
+  if (displaySyncStep_ <= 12U) {
+    writeRemainingCycles(displaySyncStep_ - 11U);
+    return;
+  }
+  if (displaySyncStep_ <= 18U) {
+    const uint8_t channel = displaySyncStep_ - 13U;
+    cellq::display::setSquareChannelEnabled(
+        channel, activePreset_.channelEnabled[channel] != 0U);
+    return;
+  }
   switch (displaySyncStep_) {
-    case 0:
-      cellq::display::setSquareLabel(cellq::gui::SQUARE_NAME_LABEL,
-                                     activePreset_.name);
-      break;
-    case 1:
-      formatSignedTenths(text, activePreset_.pressureTenths[0]);
-      cellq::display::setSquareLabel(cellq::gui::SQUARE_PRESSURE_1_LABEL,
-                                     text);
-      break;
-    case 2:
-      formatSignedTenths(text, activePreset_.pressureTenths[1]);
-      cellq::display::setSquareLabel(cellq::gui::SQUARE_PRESSURE_2_LABEL,
-                                     text);
-      break;
-    case 3: {
-      uint32_t onTimeHundredths = 0;
-      if (activePreset_.frequencyTenthsHz != 0) {
-        onTimeHundredths =
-            (static_cast<uint32_t>(activePreset_.dutyPercent) * 10UL +
-             activePreset_.frequencyTenthsHz / 2U) /
-            activePreset_.frequencyTenthsHz;
-      }
-      formatHundredths(text, onTimeHundredths);
-      cellq::display::setSquareLabel(cellq::gui::SQUARE_ON_TIME_LABEL, text);
-      break;
-    }
-    case 4:
-      formatUnsignedTenths(text, activePreset_.frequencyTenthsHz);
-      cellq::display::setSquareLabel(cellq::gui::SQUARE_FREQUENCY_LABEL,
-                                     text);
-      break;
-    case 5:
-      formatHoursMinutes(text, activeElapsedMs_);
-      cellq::display::setSquareLabel(
-          cellq::gui::SQUARE_ELAPSED_TIME_LABEL, text);
-      displayedMinute_ =
-          static_cast<uint32_t>(activeElapsedMs_ / 60000ULL);
-      break;
-    case 6:
-      if (activePreset_.totalCycles == 0 ||
-          activePreset_.frequencyTenthsHz == 0) {
-        strcpy(text, "--:--");
-      } else {
-        formatHoursMinutes(text, totalTimeMs());
-      }
-      cellq::display::setSquareLabel(cellq::gui::SQUARE_TOTAL_TIME_LABEL,
-                                     text);
-      break;
-    case 7: {
-      const uint8_t length = appendUnsigned(text, completedCycles_);
-      text[length] = '\0';
-      cellq::display::setSquareLabel(
-          cellq::gui::SQUARE_ELAPSED_CYCLES_LABEL, text);
-      displayedCycles_ = completedCycles_;
-      break;
-    }
-    case 8:
-      if (activePreset_.totalCycles == 0) {
-        strcpy(text, "---");
-      } else {
-        const uint8_t length = appendUnsigned(text, activePreset_.totalCycles);
-        text[length] = '\0';
-      }
-      cellq::display::setSquareLabel(
-          cellq::gui::SQUARE_TOTAL_CYCLES_LABEL, text);
-      break;
-    case 15:
+    case 19:
       cellq::display::setSquareStatus(statusImage());
       break;
-    case 16:
+    case 20:
       cellq::display::setSquareStartButton(procedureActive());
       break;
-    case 17:
+    case 21:
       cellq::display::setSquarePauseButton(
           state_ == ProcedureState::Paused);
       break;
-    case 18:
-      cellq::display::setSquareLabel(
-          cellq::gui::SQUARE_ACTIVE_NAME_LABEL,
-          procedureActive() ? activePreset_.name : "---");
+    case 22:
+      cellq::display::setSquarePauseAtCycleSwitch(
+          pauseAtCycleBoundary_);
       break;
-    case 19:
+    default:
       writeProgress();
       break;
-    default: {
-      const uint8_t channel = displaySyncStep_ - 9U;
-      cellq::display::setSquareChannelEnabled(
-          channel, activePreset_.channelEnabled[channel] != 0);
+  }
+}
+
+void writeRuntimeDisplaySyncStep() {
+  if (displaySyncStep_ <= 1U) {
+    writeRemainingTime(displaySyncStep_);
+    return;
+  }
+  if (displaySyncStep_ <= 3U) {
+    writeRemainingCycles(displaySyncStep_ - 2U);
+    return;
+  }
+  switch (displaySyncStep_) {
+    case 4:
+      cellq::display::setSquareStatus(statusImage());
       break;
-    }
+    case 5:
+      cellq::display::setSquareStartButton(procedureActive());
+      break;
+    case 6:
+      cellq::display::setSquarePauseButton(
+          state_ == ProcedureState::Paused);
+      break;
+    case 7:
+      cellq::display::setSquarePauseAtCycleSwitch(
+          pauseAtCycleBoundary_);
+      break;
+    default:
+      writeProgress();
+      break;
   }
 }
 
@@ -464,14 +661,59 @@ void updateDisplaySync(uint32_t now) {
     return;
   }
   displaySyncLastMs_ = now;
-  writeDisplaySyncStep();
+  if (fullDisplaySync_) {
+    writeFullDisplaySyncStep();
+  } else {
+    writeRuntimeDisplaySyncStep();
+  }
   ++displaySyncStep_;
-  if (displaySyncStep_ >= DISPLAY_SYNC_STEP_COUNT) {
-    displaySyncPending_ = false;
+  const uint8_t stepCount =
+      fullDisplaySync_ ? FULL_DISPLAY_SYNC_STEP_COUNT
+                       : RUNTIME_DISPLAY_SYNC_STEP_COUNT;
+  if (displaySyncStep_ < stepCount) {
+    return;
+  }
+  displaySyncPending_ = false;
+  if (fullDisplaySync_) {
     scopePreviewPending_ = true;
+    scopePreviewGroup_ = 0;
     scopeSample_ = 0;
     scopeLastWriteMs_ = now;
+  } else {
+    cellq::display::setSquarePresetReady(true);
+    DBG_SQUARE("READY");
   }
+}
+
+uint16_t previewValue(uint8_t group, uint16_t sample) {
+  if (activePreset_.frequencyTenthsHz[group] == 0U ||
+      activePreset_.dutyPercent[group] == 0U) {
+    return cellq::config::SQUARE_SCOPE_LOW_VALUE;
+  }
+  const uint32_t sampleTimeMs =
+      static_cast<uint32_t>(sample) *
+      cellq::config::SQUARE_SCOPE_PREVIEW_MS /
+      cellq::config::SQUARE_SCOPE_SAMPLE_COUNT;
+  const uint32_t phase =
+      sampleTimeMs * activePreset_.frequencyTenthsHz[group] % 10000UL;
+  return activePreset_.dutyPercent[group] == 100U ||
+                 phase <
+                     static_cast<uint32_t>(activePreset_.dutyPercent[group]) *
+                         100UL
+             ? cellq::config::SQUARE_SCOPE_HIGH_VALUE
+             : cellq::config::SQUARE_SCOPE_LOW_VALUE;
+}
+
+void finishPageSync() {
+  scopePreviewPending_ = false;
+  presetPageSynchronized_ = true;
+  if (procedureAdvancing()) {
+    refreshRuntimeSnapshot();
+    updateRuntimeDisplay(lastRuntimeDisplayMs_ +
+                         cellq::config::SQUARE_RUNTIME_DISPLAY_INTERVAL_MS);
+  }
+  cellq::display::setSquarePresetReady(true);
+  DBG_SQUARE("READY");
 }
 
 void updateScopePreview(uint32_t now) {
@@ -481,47 +723,28 @@ void updateScopePreview(uint32_t now) {
     return;
   }
   scopeLastWriteMs_ = now;
-  uint16_t value = cellq::config::SQUARE_SCOPE_LOW_VALUE;
-  if (activePreset_.frequencyTenthsHz != 0 &&
-      activePreset_.dutyPercent != 0) {
-    const uint32_t sampleTimeMs =
-        static_cast<uint32_t>(scopeSample_) *
-        cellq::config::SQUARE_SCOPE_PREVIEW_MS /
-        cellq::config::SQUARE_SCOPE_SAMPLE_COUNT;
-    const uint32_t phase =
-        sampleTimeMs * activePreset_.frequencyTenthsHz % 10000UL;
-    if (activePreset_.dutyPercent == 100U ||
-        phase < static_cast<uint32_t>(activePreset_.dutyPercent) * 100UL) {
-      value = cellq::config::SQUARE_SCOPE_HIGH_VALUE;
-    }
-  }
-  cellq::display::addSquareScopeSample(value);
+  cellq::display::addSquareScopeSample(
+      scopePreviewGroup_, previewValue(scopePreviewGroup_, scopeSample_));
   ++scopeSample_;
-  if (scopeSample_ >= cellq::config::SQUARE_SCOPE_SAMPLE_COUNT) {
-    scopePreviewPending_ = false;
-    if (state_ == ProcedureState::Running) {
-      const uint32_t minute =
-          static_cast<uint32_t>(activeElapsedMs_ / 60000ULL);
-      if (minute != displayedMinute_) {
-        writeElapsedTime();
-      }
-      if (completedCycles_ != displayedCycles_) {
-        writeElapsedCycles();
-        writeProgress();
-      }
-    }
-    cellq::display::setSquarePresetReady(true);
-    DBG_SQUARE("READY");
+  if (scopeSample_ < cellq::config::SQUARE_SCOPE_SAMPLE_COUNT) {
+    return;
+  }
+  scopeSample_ = 0;
+  ++scopePreviewGroup_;
+  if (scopePreviewGroup_ >= GROUP_COUNT) {
+    finishPageSync();
   }
 }
 
-void beginPageSync(uint32_t now) {
+void beginPageSync(uint32_t now, bool fullSync) {
   cellq::display::setSquarePresetReady(false);
-  displayedMinute_ = UINT32_MAX;
-  displayedCycles_ = UINT32_MAX;
+  for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+    displayedMinute_[group] = UINT32_MAX;
+    displayedRemainingCycles_[group] = UINT32_MAX;
+  }
   displayedProgress_ = PROGRESS_NOT_SENT;
   lastRuntimeDisplayMs_ = now;
-  startDisplaySync(now);
+  startDisplaySync(now, fullSync);
 }
 
 void loadPreset1(uint32_t now) {
@@ -530,18 +753,70 @@ void loadPreset1(uint32_t now) {
   loadedFromSd = cellq::preset::loadFactoryPreset1(activePreset_);
 #endif
   if (!loadedFromSd) {
-    memcpy_P(&activePreset_, &FACTORY_PRESET_1, sizeof(activePreset_));
+    copyFactoryPreset(1U, activePreset_);
   }
   presetLoaded_ = true;
+  presetPageSynchronized_ = false;
   state_ = ProcedureState::Idle;
-  activeElapsedMs_ = 0;
-  completedCycles_ = 0;
-  beginPageSync(now);
+  resetCountdowns();
+  beginPageSync(now, true);
   if (loadedFromSd) {
     DBG_SQUARE("LOAD,1,SD");
   } else {
-    DBG_SQUARE("LOAD,1,FLASH");
+    DBG_PRESET_FLASH(1U);
   }
+}
+
+void openSquarePage(uint32_t now) {
+  form2Visible_ = true;
+  presetSelectVisible_ = false;
+  presetListScanPending_ = false;
+  presetListWritePending_ = false;
+  if (displaySyncPending_ || scopePreviewPending_) {
+    return;
+  }
+  if (!presetLoaded_) {
+    loadPreset1(now);
+  } else if (!presetPageSynchronized_) {
+    beginPageSync(now, true);
+    DBG_PRESET_CACHE(activePreset_.id);
+  } else if (procedureActive() || state_ == ProcedureState::Done ||
+             state_ == ProcedureState::Error) {
+    if (procedureActive()) {
+      refreshRuntimeSnapshot();
+    }
+    beginPageSync(now, false);
+    DBG_PRESET_CACHE(activePreset_.id);
+  } else {
+    cellq::display::setSquarePresetReady(true);
+    DBG_PRESET_CACHE(activePreset_.id);
+  }
+}
+
+void selectPreset(uint8_t slot, uint32_t now) {
+  if (procedureActive() || !presetListCached_ ||
+      slot >= cellq::config::SQUARE_PRESET_SLOT_COUNT ||
+      !presetAvailable_[slot]) {
+    return;
+  }
+  const uint16_t id = static_cast<uint16_t>(slot) + 1U;
+  cellq::SquareWavePreset candidate = {};
+  if (!loadSelectedPreset(id, candidate)) {
+    presetAvailable_[slot] = false;
+    strcpy(presetNames_[slot], UNAVAILABLE_PRESET_NAME);
+    cellq::display::setPresetSelectName(slot, UNAVAILABLE_PRESET_NAME);
+    return;
+  }
+
+  activePreset_ = candidate;
+  presetLoaded_ = true;
+  presetPageSynchronized_ = false;
+  state_ = ProcedureState::Idle;
+  resetCountdowns();
+  presetSelectVisible_ = false;
+  form2Visible_ = true;
+  cellq::display::activateForm(cellq::gui::SQUARE_FORM);
+  beginPageSync(now, true);
 }
 }
 
@@ -551,25 +826,43 @@ void begin() {
   waveform::begin();
   state_ = ProcedureState::Idle;
   form2Visible_ = false;
+  presetSelectVisible_ = false;
   presetLoaded_ = false;
+  presetPageSynchronized_ = false;
+  pauseAtCycleBoundary_ = false;
   displayedProgress_ = PROGRESS_NOT_SENT;
   displaySyncPending_ = false;
   scopePreviewPending_ = false;
+  presetListCached_ = false;
+  presetListScanPending_ = false;
+  presetListWritePending_ = false;
 }
 
 void update(uint32_t now) {
-  if (state_ == ProcedureState::Running) {
-    activeElapsedMs_ += static_cast<uint32_t>(now - lastTickMs_);
-    lastTickMs_ = now;
-    completedCycles_ = waveform::completedCycles();
+  if (procedureAdvancing()) {
+    refreshRuntimeSnapshot();
     if (waveform::takeFinished()) {
-      completedCycles_ = waveform::completedCycles();
-      activeElapsedMs_ = totalTimeMs();
+      for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+        waveform::takeGroupFinished(group);
+      }
       finishProcedure();
-    } else if (form2Visible_ &&
-        !displaySyncPending_ && !scopePreviewPending_) {
-      updateRuntimeDisplay(now);
+    } else {
+      for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
+        if (waveform::takeGroupFinished(group)) {
+          regulator::idle(group);
+        }
+      }
+      if (waveform::takeBoundaryPaused()) {
+        completeBoundaryPause();
+      } else if (form2Visible_ && !displaySyncPending_ &&
+                 !scopePreviewPending_) {
+        updateRuntimeDisplay(now);
+      }
     }
+  }
+  if (presetSelectVisible_) {
+    scanNextPresetSlot(now);
+    updatePresetListDisplay(now);
   }
   if (!form2Visible_) {
     return;
@@ -581,22 +874,45 @@ void update(uint32_t now) {
 void handleDisplayEvent(const display::Event &event, uint32_t now) {
   if (event.object == gui::FORM_OBJECT) {
     if (event.index == gui::SQUARE_FORM) {
-      form2Visible_ = true;
-      if (procedureActive() || state_ == ProcedureState::Done ||
-          state_ == ProcedureState::Error) {
-        beginPageSync(now);
-      } else {
-        loadPreset1(now);
-      }
-    } else {
+      openSquarePage(now);
+    } else if (event.index == gui::PRESET_SELECT_FORM) {
       form2Visible_ = false;
       displaySyncPending_ = false;
       scopePreviewPending_ = false;
+      if (procedureActive()) {
+        presetSelectVisible_ = false;
+        cellq::display::activateForm(gui::SQUARE_FORM);
+        openSquarePage(now);
+        DBG_SQUARE("SELECT,LOCKED");
+      } else {
+        presetSelectVisible_ = true;
+        beginPresetList(now);
+      }
+    } else {
+      form2Visible_ = false;
+      presetSelectVisible_ = false;
+      displaySyncPending_ = false;
+      scopePreviewPending_ = false;
+      presetListScanPending_ = false;
+      presetListWritePending_ = false;
     }
     return;
   }
-  if (!form2Visible_ || event.object != gui::USERBUTTON_OBJECT ||
-      event.value > 1U) {
+  if (presetSelectVisible_ && event.object == gui::USERBUTTON_OBJECT &&
+      event.index >= gui::PRESET_SELECT_BUTTON_FIRST &&
+      event.index <= gui::PRESET_SELECT_BUTTON_LAST && event.value <= 1U) {
+    selectPreset(event.index - gui::PRESET_SELECT_BUTTON_FIRST, now);
+    return;
+  }
+  if (!form2Visible_ || event.value > 1U) {
+    return;
+  }
+  if (event.object == gui::ISWITCH_OBJECT &&
+      event.index == gui::SQUARE_PAUSE_AT_CYCLE_SWITCH) {
+    pauseAtCycleBoundary_ = event.value != 0U;
+    return;
+  }
+  if (event.object != gui::USERBUTTON_OBJECT) {
     return;
   }
   if (event.index == gui::SQUARE_START_BUTTON) {
@@ -622,17 +938,15 @@ bool isProcedureActive() {
 
 bool isChannelEnabled(uint8_t channel) {
   return presetLoaded_ && channel < hw::CHANNEL_COUNT &&
-         activePreset_.channelEnabled[channel] != 0;
+         activePreset_.channelEnabled[channel] != 0U;
 }
 
 int16_t channelPressureTenths(uint8_t channel) {
   if (!presetLoaded_ || channel >= hw::CHANNEL_COUNT) {
     return 0;
   }
-  const uint8_t regulator = hw::CHANNEL_TO_REGULATOR[channel];
-  return regulator < hw::REGULATOR_COUNT
-             ? activePreset_.pressureTenths[regulator]
-             : 0;
+  const uint8_t group = hw::CHANNEL_TO_REGULATOR[channel];
+  return group < GROUP_COUNT ? activePreset_.pressureTenths[group] : 0;
 }
 }
 }

@@ -21,10 +21,22 @@ enum class ParseError : uint8_t {
 
 enum class LineResult : uint8_t { Line, End, TooLong, InvalidCharacter };
 
-constexpr char FACTORY_PRESET_1_PATH[] = "/PRESETS/FCTRY1.CSV";
 constexpr char FIELD_HEADER[] =
     "FIELDS,CH,ENABLED,FREQ_X10_HZ,DUTY_PCT,DELAY_MS,TOTAL_CYCLES";
 bool sdAvailable_ = false;
+
+void buildFactoryPath(uint16_t id, char *path) {
+  strcpy(path, "/PRESETS/FCTRY0.CSV");
+  path[14] = static_cast<char>('0' + id);
+}
+
+void buildUserPath(uint16_t id, char slot, char *path) {
+  strcpy(path, "/PRESETS/SW000A.CSV");
+  path[11] = static_cast<char>('0' + id / 100U);
+  path[12] = static_cast<char>('0' + id / 10U % 10U);
+  path[13] = static_cast<char>('0' + id % 10U);
+  path[14] = slot;
+}
 
 uint32_t updateCrc(uint32_t crc, const char *text) {
   while (*text != '\0') {
@@ -208,10 +220,11 @@ ParseError parsePreset(File &file, uint16_t expectedId,
   uint32_t crc = 0xFFFFFFFFUL;
   uint32_t value;
   int32_t signedValue;
-  uint16_t sharedFrequency = 0;
-  uint8_t sharedDuty = 0;
-  uint16_t sharedDelay = 0;
-  uint32_t sharedCycles = 0;
+  uint16_t groupFrequency[cellq::hw::REGULATOR_COUNT] = {};
+  uint8_t groupDuty[cellq::hw::REGULATOR_COUNT] = {};
+  uint16_t groupDelay[cellq::hw::REGULATOR_COUNT] = {};
+  uint32_t groupCycles[cellq::hw::REGULATOR_COUNT] = {};
+  bool groupParametersSet[cellq::hw::REGULATOR_COUNT] = {};
 
   for (uint8_t record = 0; record < 17U; ++record) {
     const LineResult lineResult = readLine(file, line, sizeof(line));
@@ -332,13 +345,19 @@ ParseError parsePreset(File &file, uint16_t expectedId,
           frequency < cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ) {
         return ParseError::OutOfRange;
       }
-      if (channel == 0U) {
-        sharedFrequency = static_cast<uint16_t>(frequency);
-        sharedDuty = static_cast<uint8_t>(duty);
-        sharedDelay = static_cast<uint16_t>(delay);
-        sharedCycles = cycles;
-      } else if (frequency != sharedFrequency || duty != sharedDuty ||
-                 delay != sharedDelay || cycles != sharedCycles) {
+      const uint8_t group = cellq::hw::CHANNEL_TO_REGULATOR[channel];
+      if (group >= cellq::hw::REGULATOR_COUNT) {
+        return ParseError::WrongChannelCount;
+      }
+      if (!groupParametersSet[group]) {
+        groupFrequency[group] = static_cast<uint16_t>(frequency);
+        groupDuty[group] = static_cast<uint8_t>(duty);
+        groupDelay[group] = static_cast<uint16_t>(delay);
+        groupCycles[group] = cycles;
+        groupParametersSet[group] = true;
+      } else if (frequency != groupFrequency[group] ||
+                 duty != groupDuty[group] || delay != groupDelay[group] ||
+                 cycles != groupCycles[group]) {
         return ParseError::InvalidField;
       }
       continue;
@@ -372,41 +391,102 @@ ParseError parsePreset(File &file, uint16_t expectedId,
     }
   }
 
-  preset.frequencyTenthsHz = sharedFrequency;
-  preset.dutyPercent = sharedDuty;
-  preset.delayMs = sharedDelay;
-  preset.totalCycles = sharedCycles;
+  for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT; ++group) {
+    if (!groupParametersSet[group]) {
+      return ParseError::InvalidField;
+    }
+    preset.frequencyTenthsHz[group] = groupFrequency[group];
+    preset.dutyPercent[group] = groupDuty[group];
+    preset.delayMs[group] = groupDelay[group];
+    preset.totalCycles[group] = groupCycles[group];
+  }
   return ParseError::None;
 }
 
-void reportError(ParseError error) {
+ParseError parsePath(const char *path, uint16_t id,
+                     cellq::SquareWavePreset &preset) {
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    return ParseError::FileOpen;
+  }
+  cellq::SquareWavePreset candidate = {};
+  const ParseError error = parsePreset(file, id, candidate);
+  file.close();
+  if (error == ParseError::None) {
+    preset = candidate;
+  }
+  return error;
+}
+
+ParseError findPresetInternal(uint16_t id,
+                              cellq::SquareWavePreset &preset) {
+  if (!sdAvailable_) {
+    return ParseError::SdUnavailable;
+  }
+  if (id == 0U || id > cellq::config::SQUARE_PRESET_SLOT_COUNT) {
+    return ParseError::InvalidField;
+  }
+
+  char path[20];
+  if (id <= 2U) {
+    buildFactoryPath(id, path);
+    return parsePath(path, id, preset);
+  }
+
+  cellq::SquareWavePreset candidateA = {};
+  cellq::SquareWavePreset candidateB = {};
+  buildUserPath(id, 'A', path);
+  const ParseError errorA = parsePath(path, id, candidateA);
+  buildUserPath(id, 'B', path);
+  const ParseError errorB = parsePath(path, id, candidateB);
+  const bool validA = errorA == ParseError::None;
+  const bool validB = errorB == ParseError::None;
+  if (validA && validB) {
+    preset = candidateB.revision > candidateA.revision
+                 ? candidateB
+                 : candidateA;
+    return ParseError::None;
+  }
+  if (validA) {
+    preset = candidateA;
+    return ParseError::None;
+  }
+  if (validB) {
+    preset = candidateB;
+    return ParseError::None;
+  }
+  return errorA != ParseError::FileOpen ? errorA : errorB;
+}
+
+void reportError(uint16_t id, ParseError error) {
+  (void)id;
   switch (error) {
     case ParseError::SdUnavailable:
-      DBG_PRESET_ERROR("SD");
+      DBG_PRESET_ERROR(id, "SD");
       break;
     case ParseError::FileOpen:
-      DBG_PRESET_ERROR("OPEN");
+      DBG_PRESET_ERROR(id, "OPEN");
       break;
     case ParseError::FileTooLong:
-      DBG_PRESET_ERROR("LONG");
+      DBG_PRESET_ERROR(id, "LONG");
       break;
     case ParseError::BadSignature:
-      DBG_PRESET_ERROR("SIG");
+      DBG_PRESET_ERROR(id, "SIG");
       break;
     case ParseError::UnsupportedVersion:
-      DBG_PRESET_ERROR("VER");
+      DBG_PRESET_ERROR(id, "VER");
       break;
     case ParseError::OutOfRange:
-      DBG_PRESET_ERROR("RANGE");
+      DBG_PRESET_ERROR(id, "RANGE");
       break;
     case ParseError::WrongChannelCount:
-      DBG_PRESET_ERROR("CHANNEL");
+      DBG_PRESET_ERROR(id, "CHANNEL");
       break;
     case ParseError::CrcMismatch:
-      DBG_PRESET_ERROR("CRC");
+      DBG_PRESET_ERROR(id, "CRC");
       break;
     default:
-      DBG_PRESET_ERROR("FIELD");
+      DBG_PRESET_ERROR(id, "FIELD");
       break;
   }
 }
@@ -425,27 +505,24 @@ void begin() {
   }
 }
 
-bool loadFactoryPreset1(SquareWavePreset &preset) {
-  if (!sdAvailable_) {
-    reportError(ParseError::SdUnavailable);
-    return false;
-  }
-  File file = SD.open(FACTORY_PRESET_1_PATH, FILE_READ);
-  if (!file) {
-    reportError(ParseError::FileOpen);
-    return false;
-  }
+bool findPreset(uint16_t id, SquareWavePreset &preset) {
+  return findPresetInternal(id, preset) == ParseError::None;
+}
 
+bool loadPreset(uint16_t id, SquareWavePreset &preset) {
   SquareWavePreset candidate = {};
-  const ParseError error = parsePreset(file, 1U, candidate);
-  file.close();
+  const ParseError error = findPresetInternal(id, candidate);
   if (error != ParseError::None) {
-    reportError(error);
+    reportError(id, error);
     return false;
   }
   preset = candidate;
   DBG_PRESET_LOAD(preset.id, preset.revision);
   return true;
+}
+
+bool loadFactoryPreset1(SquareWavePreset &preset) {
+  return loadPreset(1U, preset);
 }
 }
 }

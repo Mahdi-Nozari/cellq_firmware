@@ -135,11 +135,30 @@
     }                                                                         \
   } while (0)
 
-#define DBG_PRESET_ERROR(code)                                                \
+#define DBG_PRESET_ERROR(i, code)                                             \
   do {                                                                        \
     if (Serial.availableForWrite() >= 24) {                                   \
-      Serial.print(F("D,PR,ERR,1,"));                                        \
+      Serial.print(F("D,PR,ERR,"));                                          \
+      Serial.print(i);                                                        \
+      Serial.print(',');                                                      \
       Serial.println(F(code));                                                \
+    }                                                                         \
+  } while (0)
+
+#define DBG_PRESET_CACHE(i)                                                   \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 18) {                                   \
+      Serial.print(F("D,SW,CACHE,"));                                        \
+      Serial.println(i);                                                      \
+    }                                                                         \
+  } while (0)
+
+#define DBG_PRESET_FLASH(i)                                                   \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 24) {                                   \
+      Serial.print(F("D,SW,LOAD,"));                                         \
+      Serial.print(i);                                                        \
+      Serial.println(F(",FLASH"));                                           \
     }                                                                         \
   } while (0)
 
@@ -166,6 +185,8 @@
 #define DBG_SD_OK() do { } while (0)
 #define DBG_SD_FAIL() do { } while (0)
 #define DBG_PRESET_LOAD(i, r) do { } while (0)
-#define DBG_PRESET_ERROR(code) do { } while (0)
+#define DBG_PRESET_ERROR(i, code) do { } while (0)
+#define DBG_PRESET_CACHE(i) do { } while (0)
+#define DBG_PRESET_FLASH(i) do { } while (0)
 #define DBG_SQUARE(message) do { } while (0)
 #endif

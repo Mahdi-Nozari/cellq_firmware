@@ -10,7 +10,7 @@ This guide describes the USB serial debug messages currently produced by the Cel
 - Debug switch: `CELLQ_DEBUG` at the top of `include/BuildConfig.h`
 - DAC acknowledgment policy: `CELLQ_REQUIRE_DAC_ACK` immediately below it
 - Monitor sensor source: `CELLQ_VIRTUAL_PRESSURE_SENSORS` in `include/BuildConfig.h`
-- Factory preset 1 source: `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` in `include/BuildConfig.h`
+- Factory preset source: `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` in `include/BuildConfig.h`
 
 ```cpp
 #define CELLQ_DEBUG 1
@@ -25,7 +25,7 @@ For `CELLQ_REQUIRE_DAC_ACK`, use `0` during display-only bench testing so the Sq
 
 Set `CELLQ_VIRTUAL_PRESSURE_SENSORS` to `1` for display-only testing. Set it to `0` when the six physical sensors are connected.
 
-Set `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` to `1` to try `/PRESETS/FCTRY1.CSV` when idle Form 2 opens. Set it to `0` to always use the compiled factory preset. A failed SD load also falls back automatically.
+Set `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` to `1` to use valid `/PRESETS/FCTRY1.CSV` and `/PRESETS/FCTRY2.CSV` mirrors. Set it to `0` to always use both compiled factory presets. A failed factory SD load also falls back automatically.
 
 Debug output is best-effort. A message is skipped when there is not enough room in the serial transmit buffer, so debugging cannot block important firmware work.
 
@@ -46,17 +46,21 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
 | `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
 | `D,SD,OK` | SD card initialization on D10 succeeded at boot. |
-| `D,SD,FAIL` | SD card initialization failed; the compiled preset remains available. |
+| `D,SD,FAIL` | SD card initialization failed; both compiled factory presets remain available. |
 | `D,PR,LOAD,<id>,<revision>` | The SD preset passed all parsing, range, and CRC checks. |
-| `D,PR,ERR,1,<code>` | SD preset 1 could not be loaded; see the error-code table below. |
+| `D,PR,ERR,<id>,<code>` | The requested SD preset could not be loaded; see the error-code table below. Empty Form 7 positions are probed silently and do not generate one error per slot. |
 | `D,SW,LOAD,1,SD` | Square-wave preset 1 was committed from the SD file. |
-| `D,SW,LOAD,1,FLASH` | The compiled factory preset 1 fallback was loaded. |
-| `D,SW,READY` | All preset fields and the Scope0 preview were sent; UserImages13 was changed to image 1. |
+| `D,SW,LOAD,<id>,FLASH` | The matching compiled factory preset fallback was loaded. |
+| `D,SW,CACHE,<id>` | Form 2 reused the active preset from RAM without reading the SD card. |
+| `D,SW,LIST,READY` | All 18 cached Form 7 preset names were sent to ILabelB46-ILabelB63. |
+| `D,SW,SELECT,LOCKED` | Form 7 opened during an active procedure, so firmware returned to Form 2 without allowing selection. |
+| `D,SW,READY` | The required Form 2 synchronization completed and UserImages13 changed to image 1. The first load includes static fields plus Scope0 and Scope7; later active-state returns include only runtime fields. |
 | `D,SW,START` | The Square-wave procedure started. |
-| `D,SW,PAUSE` | The Square-wave procedure paused with outputs preserved. |
+| `D,SW,PAUSE,WAIT` | ISwitch7 was ON, so a cycle-boundary pause was requested. Each unfinished group is still completing its current cycle. |
+| `D,SW,PAUSE` | The Square-wave procedure is fully paused. With immediate pause, valve phases are preserved; with cycle-boundary pause, both groups are OFF at their boundaries. Regulators remain active. |
 | `D,SW,RESUME` | The paused Square-wave procedure resumed. |
 | `D,SW,STOP` | The Square-wave procedure stopped and outputs returned to idle. |
-| `D,SW,DONE` | The configured total cycle count completed. |
+| `D,SW,DONE` | Both finite groups completed their configured total cycle counts. |
 | `D,SW,WARN,DAC,IGNORED` | A DAC did not acknowledge, but the procedure continued because DAC acknowledgment enforcement is disabled. |
 | `D,SW,ERR,DAC` | A regulator DAC command failed while starting the procedure. |
 | `D,SW,ERR,PRESET` | A preset failed the firmware pressure, frequency, or duty validation before starting. |
@@ -68,14 +72,14 @@ All regulator and channel numbers in the action messages are human-readable and 
 | Code | Meaning |
 |---|---|
 | `SD` | SD initialization was unavailable at boot. |
-| `OPEN` | `/PRESETS/FCTRY1.CSV` could not be opened. |
+| `OPEN` | The requested factory file or both user A/B files could not be opened. |
 | `LONG` | A CSV line exceeded the fixed 96-byte buffer. |
 | `SIG` | The `CELLQ_SW` signature was wrong. |
 | `VER` | The file schema version is unsupported. |
 | `RANGE` | A numeric value was outside its permitted range. |
 | `CHANNEL` | The channel count or ordered channel number was wrong. |
 | `CRC` | The calculated CRC32 did not match the file. |
-| `FIELD` | A record, timestamp, name, field count, or shared waveform value was invalid. |
+| `FIELD` | A record, timestamp, name, field count, or within-group waveform value was invalid. |
 
 ## Boot message
 
@@ -307,21 +311,52 @@ D,SW,LOAD,1,SD
 D,SW,READY
 ```
 
-This is the successful SD sequence for revision 1. UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by the static Scope0 preview. `D,SW,READY` appears and UserImages13 changes to image 1 only after the final preview sample is sent. This indicates that the page data is ready; it does not verify physical hardware.
+This is the successful SD sequence for revision 1. UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by 32 samples for group 1 on Scope0 and 32 samples for group 2 on Scope7. Both scopes should use Xmag 10 and RefreshIncrement 32 in Workshop. `D,SW,READY` appears and UserImages13 changes to image 1 only after both previews finish. This indicates that the page data is ready; it does not verify physical hardware.
 
 If the SD file is unavailable or invalid, `D,PR,ERR,1,<code>` and `D,SW,LOAD,1,FLASH` appear instead. The page still loads the compiled preset and becomes ready.
+
+### Opening Form 7 and selecting a preset
+
+On the first idle Form 7 activation, firmware silently scans IDs 1-18 and caches each valid name. Missing or invalid entries are shown as `---`. After the 18 staged label writes complete:
+
+```text
+D,SW,LIST,READY
+```
+
+Later Form 7 visits reuse the RAM list and produce the same ready message without rescanning every SD file. Selecting a valid SD preset produces its normal validation record, activates Form 2, and performs a complete page synchronization:
+
+```text
+D,PR,LOAD,<id>,<revision>
+D,SW,READY
+```
+
+Selecting either factory preset may instead produce `D,SW,LOAD,<id>,FLASH` when its compiled fallback is used. An unavailable `---` position is ignored.
+
+If Userbutton30 opens Form 7 while a procedure is running, waiting for a boundary pause, or paused, the firmware immediately activates Form 2 again and reports:
+
+```text
+D,SW,SELECT,LOCKED
+```
+
+The active preset, waveform phases, valves, and regulator states remain unchanged.
 
 ### Navigating while a Square-wave procedure is active
 
 A running or paused procedure continues when the display reports Form 0, Form 1, or Form 3. These navigation events still produce their normal raw `D,E,...` record, but they do not produce `D,SW,STOP`, idle DAC commands, or Manual synchronization. Operational display events are ignored while the Square-wave procedure owns the hardware.
 
-Returning to Form 2 starts a display-only synchronization of the current procedure state. UserImages13 changes to image 0 during the staged labels and Scope0 preview, followed by:
+Returning to Form 2 reuses the preset cached in RAM and produces:
+
+```text
+D,SW,CACHE,1
+```
+
+It does not reopen the SD file, resend the static preset fields, or redraw Scope0 or Scope7. An idle return only reaffirms UserImages13 image 1. A running, paused, done, or error return briefly synchronizes the nine changing runtime fields, followed by:
 
 ```text
 D,SW,READY
 ```
 
-There is no new `D,SW,LOAD,1` during this return synchronization, and the procedure timing is not restarted. Form 0 cannot navigate directly to Form 3 in the current GUI; any route from Manual/Home to Form 3 passes through Form 2, which safely deactivates Manual mode before the monitor page is reached.
+There is no new `D,PR,LOAD,...` or `D,SW,LOAD,...` during this return synchronization, and the procedure timing is not restarted. Form 0 cannot navigate directly to Form 3 in the current GUI; any route from Manual/Home to Form 3 passes through Form 2, which safely deactivates Manual mode before the monitor page is reached.
 
 ### Starting and completing factory preset 1
 
@@ -349,12 +384,32 @@ This warning is expected when `CELLQ_REQUIRE_DAC_ACK=0`. It confirms that the pr
 
 ### Pausing and continuing
 
+With ISwitch7 OFF, the procedure pauses immediately:
+
 ```text
 D,SW,PAUSE
 D,SW,RESUME
 ```
 
-Pause keeps the current valve and regulator outputs unchanged. Resume continues from the preserved elapsed time and waveform phase.
+The immediate pause keeps each group's current valve and regulator outputs unchanged. Resume continues from each preserved waveform phase.
+
+With ISwitch7 ON, the request and the completed pause are separate messages:
+
+```text
+D,SW,PAUSE,WAIT
+D,SW,PAUSE
+D,SW,RESUME
+```
+
+Between `PAUSE,WAIT` and `PAUSE`, each unfinished group completes its current cycle, turns its valves OFF, and waits. `D,SW,PAUSE` appears only after both groups are at cycle boundaries. Resume begins both next cycles together. Both regulators remain active while paused.
+
+When one group completes all its configured cycles before the other, its regulator is idled independently and produces a zero-code DAC message such as:
+
+```text
+D,DAC,1,0,<result>
+```
+
+The other group continues until it also completes. The final group completion is followed by both zero-code DAC commands and `D,SW,DONE`.
 
 Square-wave valve edges and finite-cycle valve shutdown run inside the Timer5 interrupt, so they do not emit serial messages from the interrupt. The channel-1 built-in LED mirror is updated directly by the same interrupt. Procedure-level `D,SW,...` messages are emitted later by the main loop.
 

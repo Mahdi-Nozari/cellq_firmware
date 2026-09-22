@@ -5,6 +5,7 @@ namespace cellq {
 namespace regulator {
 void begin();
 void idle();
+void idle(uint8_t regulator);
 bool setPressureTenths(uint8_t regulator, int16_t tenths);
 uint16_t pressureToDacCode(int16_t tenths);
 }

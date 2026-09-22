@@ -35,8 +35,12 @@ void begin() {
 void idle() {
   for (uint8_t regulator = 0; regulator < hw::REGULATOR_COUNT;
        ++regulator) {
-    writeCode(regulator, config::REGULATOR_SAFE_DAC_CODE);
+    idle(regulator);
   }
+}
+
+void idle(uint8_t regulator) {
+  writeCode(regulator, config::REGULATOR_SAFE_DAC_CODE);
 }
 
 uint16_t pressureToDacCode(int16_t tenths) {
