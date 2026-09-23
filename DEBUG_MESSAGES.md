@@ -48,12 +48,32 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SD,OK` | SD card initialization on D10 succeeded at boot. |
 | `D,SD,FAIL` | SD card initialization failed; both compiled factory presets remain available. |
 | `D,PR,LOAD,<id>,<revision>` | The SD preset passed all parsing, range, and CRC checks. |
+| `D,PR,SAVE,<id>,<revision>` | A user-preset A/B revision was written and passed full readback validation. |
+| `D,PR,DELETE,<id>` | Both SD files for the user-preset ID were removed. |
 | `D,PR,ERR,<id>,<code>` | The requested SD preset could not be loaded; see the error-code table below. Empty Form 7 positions are probed silently and do not generate one error per slot. |
+| `D,RTC,OK` | The PCF8523 was found and its time is initialized without a lost-power flag. |
+| `D,RTC,INVALID` | The PCF8523 responded but its time cannot be trusted; saves use the zero timestamp. |
+| `D,RTC,FAIL` | The PCF8523 did not respond; saves use the zero timestamp. |
+| `D,SET,LOAD,1` | Form 4 loaded factory preset 1 into the setup draft. |
+| `D,SET,SELECT` | A validated Form 7 preset was loaded into the Form 4 draft. |
+| `D,SET,NAME,OPEN` | Form 6 opened with the current draft name in ILabelB64. |
+| `D,SET,NAME,SET` | The valid temporary name was applied to the RAM draft. |
+| `D,SET,NAME,CANCEL` | Form 6 Back returned to Form 4 without changing the draft name. |
+| `D,SET,NAME,INVALID` | Set was ignored because the name was empty or had a leading/trailing space. |
+| `D,SET,NAME,READONLY` | Userbutton52 was ignored because a factory preset was displayed. |
+| `D,SET,READY` | The staged Form 4 labels and channel buttons finished synchronizing. |
+| `D,SET,NEW` / `NEW,FULL` | A new lowest-vacant-ID draft was created, or all user IDs are occupied. |
+| `D,SET,SAVE,OK` / `SAVE,FAIL` | Form 4 save completed or failed. |
+| `D,SET,DELETE,OK` / `DELETE,FAIL` | Form 4 deletion completed or failed. |
+| `D,SET,LOCKED` | Setup navigation was rejected because a test is active. |
+| `D,SET,EDIT,READONLY` | An edit was attempted while a factory preset was displayed. |
+| `D,SET,SAVE,READONLY` / `DELETE,READONLY` | Save or delete was attempted for a factory preset. |
 | `D,SW,LOAD,1,SD` | Square-wave preset 1 was committed from the SD file. |
 | `D,SW,LOAD,<id>,FLASH` | The matching compiled factory preset fallback was loaded. |
 | `D,SW,CACHE,<id>` | Form 2 reused the active preset from RAM without reading the SD card. |
 | `D,SW,LIST,READY` | All 18 cached Form 7 preset names were sent to ILabelB46-ILabelB63. |
-| `D,SW,SELECT,LOCKED` | Form 7 opened during an active procedure, so firmware returned to Form 2 without allowing selection. |
+| `D,SW,SELECT,LOCKED` | Preset selection was requested during an active procedure, or Form 7 was reached through another route. The active procedure was preserved and Form 7 was not allowed to remain open. |
+| `D,SW,SELECT,SETUP` | A Form 7 selection was routed back to Form 4 rather than committed as the active run preset. |
 | `D,SW,READY` | The required Form 2 synchronization completed and UserImages13 changed to image 1. The first load includes static fields plus Scope0 and Scope7; later active-state returns include only runtime fields. |
 | `D,SW,START` | The Square-wave procedure started. |
 | `D,SW,PAUSE,WAIT` | ISwitch7 was ON, so a cycle-boundary pause was requested. Each unfinished group is still completing its current cycle. |
@@ -80,6 +100,10 @@ All regulator and channel numbers in the action messages are human-readable and 
 | `CHANNEL` | The channel count or ordered channel number was wrong. |
 | `CRC` | The calculated CRC32 did not match the file. |
 | `FIELD` | A record, timestamp, name, field count, or within-group waveform value was invalid. |
+| `DIR` | The `/PRESETS/` directory could not be created for a save. |
+| `SAVE` | The target A/B file could not be prepared or fully written. |
+| `VERIFY` | The newly written file failed full parse/CRC readback and was removed. |
+| `DELETE` | One of the preset's A/B files could not be removed. |
 
 ## Boot message
 
@@ -128,8 +152,10 @@ Form 0 also reports activation. Moving from Manual Form 1 to Form 0 hides the Ma
 | Form | 0 | Home page navigation report |
 | Form | 2 | Load factory preset 1 when idle, or synchronize the current Square-wave state |
 | Form | 3 | Square-wave monitor page navigation report |
+| Userbutton | 24 | Request setup Form 4 while the procedure is stopped |
 | Userbutton | 27 | Start or stop the procedure |
 | Userbutton | 28 | Pause or continue the procedure |
+| Userbutton | 30 | Request preset-selection Form 7 while stopped |
 
 ### Current monitor event indices
 
@@ -139,8 +165,36 @@ Form 0 also reports activation. Moving from Manual Form 1 to Form 0 hides the Ma
 | ILabelB | 8-13 | Pressure values for channels 1-6; firmware output only |
 | UserImages | 0-5 | Not-running, active, or suppressed channel state; firmware output only |
 | Scope | 1-6 | Real-time pressure traces for channels 1-6; firmware output only |
+| Userbutton | 26 | Request setup Form 4 while the procedure is stopped |
 
 Any reported activation of another form disables monitor sampling and writes.
+
+### Current setup Form 4 event indices
+
+| LCD object | Index | Function |
+|---|---:|---|
+| Form | 4 | Load factory preset 1 into the setup draft |
+| Userbutton | 36-39 / 44-47 | Group 1 pressure, frequency, ON time, and delay increase/decrease |
+| Userbutton | 43,42,41,40 / 48-51 | Group 2 pressure, frequency, ON time, and delay increase/decrease |
+| Userbutton | 52 | Open Form 6 to edit an existing user-preset draft name |
+| Userbutton | 53 | Open the shared Form 7 selector and discard the current unsaved draft |
+| Userbutton | 54 | Create a new draft using the lowest vacant ID |
+| Userbutton | 55 | Save the current user-preset draft |
+| Userbutton | 56 | Delete the current user preset |
+| Userbutton | 57-62 | Toggle channels 1-6 between enabled image 0 and suppressed image 1 |
+
+Factory presets are read-only. Press New to create an editable user draft, or use Userbutton53 to select an existing user preset for editing. Userbutton52 edits that draft's name through Form 6.
+
+### Current name-entry Form 6 event indices
+
+| LCD object | Index | Function |
+|---|---:|---|
+| Form | 6 | Show the current draft name in ILabelB64 |
+| Keyboard | 0 | Report the pressed character; key value 8 is Backspace |
+| Userbutton | 32 | Validate the temporary name, apply it to the RAM draft, and return to Form 4 |
+| ILabelB | 64 | Current temporary name; firmware output only |
+
+The Form 6 Back button directly activates Form 4 and cancels the temporary name. A name is written to SD only when Userbutton55 subsequently saves the full preset.
 
 ## Queue overflow message
 
@@ -332,13 +386,13 @@ D,SW,READY
 
 Selecting either factory preset may instead produce `D,SW,LOAD,<id>,FLASH` when its compiled fallback is used. An unavailable `---` position is ignored.
 
-If Userbutton30 opens Form 7 while a procedure is running, waiting for a boundary pause, or paused, the firmware immediately activates Form 2 again and reports:
+If Userbutton30 is pressed while a procedure is running, waiting for a boundary pause, or paused, firmware remains on Form 2 and reports:
 
 ```text
 D,SW,SELECT,LOCKED
 ```
 
-The active preset, waveform phases, valves, and regulator states remain unchanged.
+The active preset, waveform phases, valves, and regulator states remain unchanged. If Form 7 is reached through another route during an active procedure, the same message is emitted and firmware activates Form 2 again.
 
 ### Navigating while a Square-wave procedure is active
 

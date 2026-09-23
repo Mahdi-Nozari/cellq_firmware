@@ -1,5 +1,6 @@
 #include "PresetStore.h"
 #include <SD.h>
+#include <stdio.h>
 #include <string.h>
 #include "BuildConfig.h"
 #include "Debug.h"
@@ -178,7 +179,8 @@ bool validName(const char *name) {
 }
 
 bool validTimestamp(const char *timestamp) {
-  if (strlen(timestamp) != 15U || timestamp[8] != 'T') {
+  if (timestamp == nullptr || strlen(timestamp) != 15U ||
+      timestamp[8] != 'T') {
     return false;
   }
   for (uint8_t index = 0; index < 15U; ++index) {
@@ -186,6 +188,34 @@ bool validTimestamp(const char *timestamp) {
       continue;
     }
     if (timestamp[index] < '0' || timestamp[index] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validPresetData(const cellq::SquareWavePreset &preset) {
+  if (preset.id < 3U ||
+      preset.id > cellq::config::SQUARE_PRESET_SLOT_COUNT ||
+      !validName(preset.name)) {
+    return false;
+  }
+  for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT; ++group) {
+    const uint16_t frequency = preset.frequencyTenthsHz[group];
+    if (preset.pressureTenths[group] <
+            cellq::config::SQUARE_PRESSURE_MIN_TENTHS ||
+        preset.pressureTenths[group] >
+            cellq::config::SQUARE_PRESSURE_MAX_TENTHS ||
+        frequency > cellq::config::SQUARE_FREQUENCY_MAX_TENTHS_HZ ||
+        (frequency != 0U &&
+         frequency < cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ) ||
+        preset.dutyPercent[group] > 100U ||
+        preset.delayMs[group] > cellq::config::SQUARE_DELAY_MAX_MS) {
+      return false;
+    }
+  }
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
+    if (preset.channelEnabled[channel] > 1U) {
       return false;
     }
   }
@@ -279,6 +309,7 @@ ParseError parsePreset(File &file, uint16_t expectedId,
           strcmp(tokens[0], expected) != 0 || !validTimestamp(tokens[1])) {
         return ParseError::InvalidField;
       }
+      strcpy(record == 4U ? preset.created : preset.modified, tokens[1]);
       continue;
     }
     if (record == 6U) {
@@ -490,6 +521,108 @@ void reportError(uint16_t id, ParseError error) {
       break;
   }
 }
+
+bool writeCoveredLine(File &file, uint32_t &crc, const char *line) {
+  crc = updateCrc(crc, line);
+  return file.println(line) > 0U;
+}
+
+bool writePresetFile(const char *path,
+                     const cellq::SquareWavePreset &preset) {
+  if (SD.exists(path) && !SD.remove(path)) {
+    return false;
+  }
+  File file = SD.open(path, FILE_WRITE);
+  if (!file) {
+    return false;
+  }
+  char line[cellq::config::PRESET_LINE_BUFFER_SIZE];
+  uint32_t crc = 0xFFFFFFFFUL;
+  bool ok = writeCoveredLine(file, crc, "CELLQ_SW,1");
+  snprintf(line, sizeof(line), "ID,%u", preset.id);
+  ok = writeCoveredLine(file, crc, line) && ok;
+  snprintf(line, sizeof(line), "REV,%lu",
+           static_cast<unsigned long>(preset.revision));
+  ok = writeCoveredLine(file, crc, line) && ok;
+  snprintf(line, sizeof(line), "NAME,%s", preset.name);
+  ok = writeCoveredLine(file, crc, line) && ok;
+  snprintf(line, sizeof(line), "CREATED,%s", preset.created);
+  ok = writeCoveredLine(file, crc, line) && ok;
+  snprintf(line, sizeof(line), "MODIFIED,%s", preset.modified);
+  ok = writeCoveredLine(file, crc, line) && ok;
+  snprintf(line, sizeof(line), "PRESSURE_X10_KPA,%d,%d",
+           preset.pressureTenths[0], preset.pressureTenths[1]);
+  ok = writeCoveredLine(file, crc, line) && ok;
+  snprintf(line, sizeof(line), "CHANNELS,%u",
+           static_cast<unsigned int>(cellq::hw::CHANNEL_COUNT));
+  ok = writeCoveredLine(file, crc, line) && ok;
+  ok = writeCoveredLine(file, crc, FIELD_HEADER) && ok;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
+    const uint8_t group = cellq::hw::CHANNEL_TO_REGULATOR[channel];
+    snprintf(line, sizeof(line), "CH,%u,%u,%u,%u,%u,%lu",
+             static_cast<unsigned int>(channel + 1U),
+             static_cast<unsigned int>(preset.channelEnabled[channel]),
+             static_cast<unsigned int>(preset.frequencyTenthsHz[group]),
+             static_cast<unsigned int>(preset.dutyPercent[group]),
+             static_cast<unsigned int>(preset.delayMs[group]),
+             static_cast<unsigned long>(preset.totalCycles[group]));
+    ok = writeCoveredLine(file, crc, line) && ok;
+  }
+  ok = writeCoveredLine(file, crc, "END,1") && ok;
+  snprintf(line, sizeof(line), "CRC32,%08lX",
+           static_cast<unsigned long>(crc ^ 0xFFFFFFFFUL));
+  ok = file.println(line) > 0U && ok;
+  file.flush();
+  ok = file.getWriteError() == 0 && ok;
+  file.close();
+  return ok;
+}
+
+bool prepareUserSave(cellq::SquareWavePreset &preset, const char *timestamp,
+                     char *path) {
+  if (!validPresetData(preset)) {
+    return false;
+  }
+  const char *saveTime = validTimestamp(timestamp)
+                             ? timestamp
+                             : "00000000T000000";
+  char pathA[20];
+  char pathB[20];
+  buildUserPath(preset.id, 'A', pathA);
+  buildUserPath(preset.id, 'B', pathB);
+  cellq::SquareWavePreset candidateA = {};
+  cellq::SquareWavePreset candidateB = {};
+  const bool validA =
+      parsePath(pathA, preset.id, candidateA) == ParseError::None;
+  const bool validB =
+      parsePath(pathB, preset.id, candidateB) == ParseError::None;
+
+  const cellq::SquareWavePreset *newest = nullptr;
+  char targetSlot = 'A';
+  if (validA && validB) {
+    newest = candidateB.revision > candidateA.revision ? &candidateB
+                                                        : &candidateA;
+    targetSlot = newest == &candidateA ? 'B' : 'A';
+  } else if (validA) {
+    newest = &candidateA;
+    targetSlot = 'B';
+  } else if (validB) {
+    newest = &candidateB;
+    targetSlot = 'A';
+  }
+  if (newest != nullptr && newest->revision == UINT32_MAX) {
+    return false;
+  }
+  preset.revision = newest == nullptr ? 1UL : newest->revision + 1UL;
+  if (newest != nullptr) {
+    strcpy(preset.created, newest->created);
+  } else if (!validTimestamp(preset.created)) {
+    strcpy(preset.created, saveTime);
+  }
+  strcpy(preset.modified, saveTime);
+  buildUserPath(preset.id, targetSlot, path);
+  return true;
+}
 }
 
 namespace cellq {
@@ -523,6 +656,74 @@ bool loadPreset(uint16_t id, SquareWavePreset &preset) {
 
 bool loadFactoryPreset1(SquareWavePreset &preset) {
   return loadPreset(1U, preset);
+}
+
+bool saveUserPreset(SquareWavePreset &preset, const char *timestamp) {
+  if (!sdAvailable_) {
+    DBG_PRESET_ERROR(preset.id, "SD");
+    return false;
+  }
+  if (!SD.exists("/PRESETS") && !SD.mkdir("/PRESETS")) {
+    DBG_PRESET_ERROR(preset.id, "DIR");
+    return false;
+  }
+  SquareWavePreset candidate = preset;
+  char path[20];
+  if (!prepareUserSave(candidate, timestamp, path)) {
+    DBG_PRESET_ERROR(preset.id, "SAVE");
+    return false;
+  }
+  if (!writePresetFile(path, candidate)) {
+    SD.remove(path);
+    DBG_PRESET_ERROR(preset.id, "SAVE");
+    return false;
+  }
+  SquareWavePreset verified = {};
+  if (parsePath(path, candidate.id, verified) != ParseError::None) {
+    SD.remove(path);
+    DBG_PRESET_ERROR(preset.id, "VERIFY");
+    return false;
+  }
+  preset = verified;
+  DBG_PRESET_SAVE(preset.id, preset.revision);
+  return true;
+}
+
+bool deleteUserPreset(uint16_t id) {
+  if (!sdAvailable_ || id < 3U ||
+      id > config::SQUARE_PRESET_SLOT_COUNT) {
+    return false;
+  }
+  char pathA[20];
+  char pathB[20];
+  buildUserPath(id, 'A', pathA);
+  buildUserPath(id, 'B', pathB);
+  const bool existed = SD.exists(pathA) || SD.exists(pathB);
+  if (SD.exists(pathA) && !SD.remove(pathA)) {
+    DBG_PRESET_ERROR(id, "DELETE");
+    return false;
+  }
+  if (SD.exists(pathB) && !SD.remove(pathB)) {
+    DBG_PRESET_ERROR(id, "DELETE");
+    return false;
+  }
+  if (!existed) {
+    return false;
+  }
+  DBG_PRESET_DELETE(id);
+  return true;
+}
+
+bool firstVacantUserId(uint16_t &id) {
+  for (uint16_t candidate = 3U;
+       candidate <= config::SQUARE_PRESET_SLOT_COUNT; ++candidate) {
+    SquareWavePreset ignored = {};
+    if (findPresetInternal(candidate, ignored) != ParseError::None) {
+      id = candidate;
+      return true;
+    }
+  }
+  return false;
 }
 }
 }

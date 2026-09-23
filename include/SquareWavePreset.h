@@ -13,5 +13,7 @@ struct SquareWavePreset {
   uint8_t dutyPercent[hw::REGULATOR_COUNT];
   uint16_t delayMs[hw::REGULATOR_COUNT];
   uint32_t totalCycles[hw::REGULATOR_COUNT];
+  char created[16];
+  char modified[16];
 };
 }

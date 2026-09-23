@@ -27,6 +27,9 @@ void setSquarePauseButton(bool continueImage);
 void setSquarePauseAtCycleSwitch(bool enabled);
 void addSquareScopeSample(uint8_t group, uint16_t value);
 void setPresetSelectName(uint8_t slot, const char *text);
+void setSquareSetupLabel(uint8_t index, const char *text);
+void setSquareSetupChannel(uint8_t channel, bool enabled);
+void setPresetNameEntry(const char *text);
 void activateForm(uint8_t form);
 }
 }

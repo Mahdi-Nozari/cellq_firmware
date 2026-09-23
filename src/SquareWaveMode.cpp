@@ -8,6 +8,7 @@
 #include "PresetStore.h"
 #include "Regulator.h"
 #include "SquareWavePreset.h"
+#include "SquareWaveSetup.h"
 #include "WaveformTimer.h"
 
 namespace {
@@ -20,6 +21,8 @@ enum class ProcedureState : uint8_t {
   Error
 };
 
+enum class PresetSelectDestination : uint8_t { Run, Setup };
+
 constexpr uint8_t GROUP_COUNT = cellq::hw::REGULATOR_COUNT;
 const cellq::SquareWavePreset FACTORY_PRESET_1 PROGMEM = {
     1,
@@ -30,7 +33,9 @@ const cellq::SquareWavePreset FACTORY_PRESET_1 PROGMEM = {
     {10, 10},
     {50, 50},
     {0, 0},
-    {30, 30}};
+    {30, 30},
+    {},
+    {}};
 const cellq::SquareWavePreset FACTORY_PRESET_2 PROGMEM = {
     2,
     1,
@@ -40,7 +45,9 @@ const cellq::SquareWavePreset FACTORY_PRESET_2 PROGMEM = {
     {10, 8},
     {40, 60},
     {500, 1000},
-    {25, 20}};
+    {25, 20},
+    {},
+    {}};
 
 constexpr uint8_t STATUS_IDLE_IMAGE = 0;
 constexpr uint8_t STATUS_RUNNING_IMAGE = 1;
@@ -61,6 +68,8 @@ cellq::SquareWavePreset activePreset_ = {};
 ProcedureState state_ = ProcedureState::Idle;
 bool form2Visible_ = false;
 bool presetSelectVisible_ = false;
+PresetSelectDestination presetSelectDestination_ =
+    PresetSelectDestination::Run;
 bool presetLoaded_ = false;
 bool presetPageSynchronized_ = false;
 bool pauseAtCycleBoundary_ = false;
@@ -223,6 +232,17 @@ void beginPresetList(uint32_t now) {
       now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
 }
 
+void openPresetSelector(uint32_t now,
+                        PresetSelectDestination destination) {
+  form2Visible_ = false;
+  displaySyncPending_ = false;
+  scopePreviewPending_ = false;
+  presetSelectDestination_ = destination;
+  presetSelectVisible_ = true;
+  beginPresetList(now);
+  cellq::display::activateForm(cellq::gui::PRESET_SELECT_FORM);
+}
+
 void scanNextPresetSlot(uint32_t now) {
   if (!presetListScanPending_) {
     return;
@@ -300,19 +320,19 @@ void idleOutputs() {
   cellq::regulator::idle();
 }
 
-bool presetValid() {
+bool presetValid(const cellq::SquareWavePreset &preset) {
   for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
-    if (activePreset_.pressureTenths[group] <
+    if (preset.pressureTenths[group] <
             cellq::config::SQUARE_PRESSURE_MIN_TENTHS ||
-        activePreset_.pressureTenths[group] >
+        preset.pressureTenths[group] >
             cellq::config::SQUARE_PRESSURE_MAX_TENTHS ||
-        activePreset_.frequencyTenthsHz[group] >
+        preset.frequencyTenthsHz[group] >
             cellq::config::SQUARE_FREQUENCY_MAX_TENTHS_HZ ||
-        (activePreset_.frequencyTenthsHz[group] != 0U &&
-         activePreset_.frequencyTenthsHz[group] <
+        (preset.frequencyTenthsHz[group] != 0U &&
+         preset.frequencyTenthsHz[group] <
              cellq::config::SQUARE_FREQUENCY_MIN_TENTHS_HZ) ||
-        activePreset_.dutyPercent[group] > 100U ||
-        activePreset_.delayMs[group] >
+        preset.dutyPercent[group] > 100U ||
+        preset.delayMs[group] >
             cellq::config::SQUARE_DELAY_MAX_MS) {
       return false;
     }
@@ -464,7 +484,7 @@ void updateRuntimeDisplay(uint32_t now) {
 }
 
 void startProcedure(uint32_t now) {
-  if (!presetLoaded_ || !presetValid()) {
+  if (!presetLoaded_ || !presetValid(activePreset_)) {
     failProcedure(false);
     return;
   }
@@ -808,12 +828,21 @@ void selectPreset(uint8_t slot, uint32_t now) {
     return;
   }
 
+  presetSelectVisible_ = false;
+  presetListScanPending_ = false;
+  presetListWritePending_ = false;
+  if (presetSelectDestination_ == PresetSelectDestination::Setup) {
+    cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
+    cellq::setup::showSelectedPreset(candidate, now);
+    DBG_SQUARE("SELECT,SETUP");
+    return;
+  }
+
   activePreset_ = candidate;
   presetLoaded_ = true;
   presetPageSynchronized_ = false;
   state_ = ProcedureState::Idle;
   resetCountdowns();
-  presetSelectVisible_ = false;
   form2Visible_ = true;
   cellq::display::activateForm(cellq::gui::SQUARE_FORM);
   beginPageSync(now, true);
@@ -827,6 +856,7 @@ void begin() {
   state_ = ProcedureState::Idle;
   form2Visible_ = false;
   presetSelectVisible_ = false;
+  presetSelectDestination_ = PresetSelectDestination::Run;
   presetLoaded_ = false;
   presetPageSynchronized_ = false;
   pauseAtCycleBoundary_ = false;
@@ -885,8 +915,11 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
         openSquarePage(now);
         DBG_SQUARE("SELECT,LOCKED");
       } else {
-        presetSelectVisible_ = true;
-        beginPresetList(now);
+        if (!presetSelectVisible_) {
+          presetSelectDestination_ = PresetSelectDestination::Run;
+          presetSelectVisible_ = true;
+          beginPresetList(now);
+        }
       }
     } else {
       form2Visible_ = false;
@@ -895,6 +928,7 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
       scopePreviewPending_ = false;
       presetListScanPending_ = false;
       presetListWritePending_ = false;
+      presetSelectDestination_ = PresetSelectDestination::Run;
     }
     return;
   }
@@ -913,6 +947,14 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
     return;
   }
   if (event.object != gui::USERBUTTON_OBJECT) {
+    return;
+  }
+  if (event.index == gui::SQUARE_PRESET_SELECT_BUTTON) {
+    if (procedureActive()) {
+      DBG_SQUARE("SELECT,LOCKED");
+    } else {
+      openPresetSelector(now, PresetSelectDestination::Run);
+    }
     return;
   }
   if (event.index == gui::SQUARE_START_BUTTON) {
@@ -947,6 +989,39 @@ int16_t channelPressureTenths(uint8_t channel) {
   }
   const uint8_t group = hw::CHANNEL_TO_REGULATOR[channel];
   return group < GROUP_COUNT ? activePreset_.pressureTenths[group] : 0;
+}
+
+bool copyPresetForEditing(uint16_t id, SquareWavePreset &preset) {
+  return findPresetForList(id, preset);
+}
+
+bool setActivePreset(const SquareWavePreset &preset) {
+  if (procedureActive() || !presetValid(preset)) {
+    return false;
+  }
+  activePreset_ = preset;
+  presetLoaded_ = true;
+  presetPageSynchronized_ = false;
+  state_ = ProcedureState::Idle;
+  resetCountdowns();
+  displaySyncPending_ = false;
+  scopePreviewPending_ = false;
+  return true;
+}
+
+bool openPresetSelectorForSetup(uint32_t now) {
+  if (procedureActive()) {
+    DBG_SQUARE("SELECT,LOCKED");
+    return false;
+  }
+  openPresetSelector(now, PresetSelectDestination::Setup);
+  return true;
+}
+
+void invalidatePresetList() {
+  presetListCached_ = false;
+  presetListScanPending_ = false;
+  presetListWritePending_ = false;
 }
 }
 }

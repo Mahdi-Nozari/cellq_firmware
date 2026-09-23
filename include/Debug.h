@@ -169,6 +169,40 @@
       Serial.println(F(message));                                             \
     }                                                                         \
   } while (0)
+
+#define DBG_SETUP(message)                                                    \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 24) {                                   \
+      Serial.print(F("D,SET,"));                                             \
+      Serial.println(F(message));                                             \
+    }                                                                         \
+  } while (0)
+
+#define DBG_PRESET_SAVE(i, r)                                                 \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 30) {                                   \
+      Serial.print(F("D,PR,SAVE,"));                                         \
+      Serial.print(i);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(r);                                                      \
+    }                                                                         \
+  } while (0)
+
+#define DBG_PRESET_DELETE(i)                                                  \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 20) {                                   \
+      Serial.print(F("D,PR,DELETE,"));                                       \
+      Serial.println(i);                                                      \
+    }                                                                         \
+  } while (0)
+
+#define DBG_RTC(message)                                                      \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 18) {                                   \
+      Serial.print(F("D,RTC,"));                                             \
+      Serial.println(F(message));                                             \
+    }                                                                         \
+  } while (0)
 #else
 #define DBG_BEGIN() do { } while (0)
 #define DBG_BOOT() do { } while (0)
@@ -189,4 +223,8 @@
 #define DBG_PRESET_CACHE(i) do { } while (0)
 #define DBG_PRESET_FLASH(i) do { } while (0)
 #define DBG_SQUARE(message) do { } while (0)
+#define DBG_SETUP(message) do { } while (0)
+#define DBG_PRESET_SAVE(i, r) do { } while (0)
+#define DBG_PRESET_DELETE(i) do { } while (0)
+#define DBG_RTC(message) do { } while (0)
 #endif

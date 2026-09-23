@@ -211,6 +211,37 @@ void setPresetSelectName(uint8_t slot, const char *text) {
   genie.WriteInhLabel(gui::PRESET_SELECT_NAME_LABEL_FIRST + slot, text);
 }
 
+void setSquareSetupLabel(uint8_t index, const char *text) {
+  if (text == nullptr) {
+    return;
+  }
+  bool valid = index == gui::SETUP_NAME_LABEL;
+  for (uint8_t group = 0; group < hw::REGULATOR_COUNT; ++group) {
+    for (uint8_t parameter = 0; parameter < 4U; ++parameter) {
+      valid = valid || index == gui::SETUP_PARAMETER_LABEL[group][parameter];
+    }
+  }
+  if (valid) {
+    genie.WriteInhLabel(index, text);
+  }
+}
+
+void setSquareSetupChannel(uint8_t channel, bool enabled) {
+  if (channel >= hw::CHANNEL_COUNT) {
+    return;
+  }
+  genie.WriteObject(gui::USERBUTTON_OBJECT,
+                    gui::SETUP_CHANNEL_BUTTON_FIRST + channel,
+                    enabled ? 0U : 1U);
+}
+
+void setPresetNameEntry(const char *text) {
+  if (text == nullptr) {
+    return;
+  }
+  genie.WriteInhLabel(gui::PRESET_NAME_LABEL, text);
+}
+
 void activateForm(uint8_t form) {
   genie.WriteObject(gui::FORM_OBJECT, form, 0);
 }

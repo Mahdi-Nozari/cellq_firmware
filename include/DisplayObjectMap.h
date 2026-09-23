@@ -5,6 +5,7 @@
 namespace cellq {
 namespace gui {
 constexpr uint8_t USERBUTTON_OBJECT = GENIE_OBJ_USERBUTTON;
+constexpr uint8_t KEYBOARD_OBJECT = GENIE_OBJ_KEYBOARD;
 constexpr uint8_t USERIMAGES_OBJECT = GENIE_OBJ_USERIMAGES;
 constexpr uint8_t SCOPE_OBJECT = GENIE_OBJ_SCOPE;
 constexpr uint8_t ISWITCH_OBJECT = GENIE_OBJ_ISWITCH;
@@ -25,6 +26,8 @@ constexpr uint8_t MANUAL_TIME_LABEL_FIRST = 2;
 constexpr uint8_t MANUAL_TIME_LABEL_LAST = 7;
 constexpr uint8_t SQUARE_FORM = 2;
 constexpr uint8_t MONITOR_FORM = 3;
+constexpr uint8_t SQUARE_SETUP_FORM = 4;
+constexpr uint8_t PRESET_NAME_FORM = 6;
 constexpr uint8_t MONITOR_CHANNEL_IMAGE_FIRST = 0;
 constexpr uint8_t MONITOR_CHANNEL_IMAGE_LAST = 5;
 constexpr uint8_t MONITOR_PRESSURE_LABEL_FIRST = 8;
@@ -49,6 +52,9 @@ constexpr uint8_t SQUARE_STATUS_IMAGE = 12;
 constexpr uint8_t SQUARE_PRESET_READY_IMAGE = 13;
 constexpr uint8_t SQUARE_START_BUTTON = 27;
 constexpr uint8_t SQUARE_PAUSE_BUTTON = 28;
+constexpr uint8_t SQUARE_PRESET_SELECT_BUTTON = 30;
+constexpr uint8_t SQUARE_SETUP_BUTTON = 24;
+constexpr uint8_t MONITOR_SETUP_BUTTON = 26;
 constexpr uint8_t SQUARE_PAUSE_AT_CYCLE_SWITCH = 7;
 constexpr uint8_t SQUARE_GROUP_SCOPE[2] = {0, 7};
 constexpr uint8_t PRESET_SELECT_FORM = 7;
@@ -56,5 +62,22 @@ constexpr uint8_t PRESET_SELECT_NAME_LABEL_FIRST = 46;
 constexpr uint8_t PRESET_SELECT_NAME_LABEL_LAST = 63;
 constexpr uint8_t PRESET_SELECT_BUTTON_FIRST = 88;
 constexpr uint8_t PRESET_SELECT_BUTTON_LAST = 105;
+constexpr uint8_t SETUP_NAME_LABEL = 36;
+constexpr uint8_t SETUP_PARAMETER_LABEL[2][4] = {
+    {23, 29, 30, 31}, {32, 33, 34, 35}};
+constexpr uint8_t SETUP_INCREASE_BUTTON[2][4] = {
+    {36, 37, 38, 39}, {43, 42, 41, 40}};
+constexpr uint8_t SETUP_DECREASE_BUTTON[2][4] = {
+    {44, 45, 46, 47}, {48, 49, 50, 51}};
+constexpr uint8_t SETUP_NEW_BUTTON = 54;
+constexpr uint8_t SETUP_SAVE_BUTTON = 55;
+constexpr uint8_t SETUP_DELETE_BUTTON = 56;
+constexpr uint8_t SETUP_PRESET_SELECT_BUTTON = 53;
+constexpr uint8_t SETUP_NAME_BUTTON = 52;
+constexpr uint8_t PRESET_NAME_SET_BUTTON = 32;
+constexpr uint8_t PRESET_NAME_LABEL = 64;
+constexpr uint8_t PRESET_NAME_KEYBOARD = 0;
+constexpr uint8_t SETUP_CHANNEL_BUTTON_FIRST = 57;
+constexpr uint8_t SETUP_CHANNEL_BUTTON_LAST = 62;
 }
 }
