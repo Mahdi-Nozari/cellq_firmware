@@ -38,7 +38,7 @@ constexpr uint16_t DISPLAY_STARTUP_MS = 3500U;
 constexpr uint8_t DISPLAY_EVENT_QUEUE_SIZE = 8U;
 constexpr int16_t MANUAL_PRESSURE_MIN_TENTHS = -800;
 constexpr int16_t MANUAL_PRESSURE_MAX_TENTHS = 0;
-constexpr int16_t MANUAL_PRESSURE_DEFAULT_TENTHS = -800;
+constexpr int16_t MANUAL_PRESSURE_DEFAULT_TENTHS = 0;
 constexpr int16_t MANUAL_PRESSURE_STEP_TENTHS = 10;
 constexpr uint16_t REGULATOR_FULL_SCALE_TENTHS = 820U;
 constexpr uint16_t REGULATOR_DAC_MAX_CODE = 4095U;
@@ -54,6 +54,7 @@ constexpr uint8_t SQUARE_PRESET_SLOT_COUNT = 18U;
 constexpr uint8_t PRESET_LINE_BUFFER_SIZE = 96U;
 constexpr uint16_t SQUARE_DISPLAY_WRITE_INTERVAL_MS = 10U;
 constexpr uint16_t SQUARE_RUNTIME_DISPLAY_INTERVAL_MS = 1000U;
+constexpr bool SQUARE_PAUSE_AT_CYCLE_DEFAULT = true;
 constexpr uint16_t SQUARE_SCOPE_SAMPLE_COUNT = 32U;
 constexpr uint16_t SQUARE_SCOPE_PREVIEW_MS = 2000U;
 constexpr uint16_t SQUARE_SCOPE_LOW_VALUE = 0U;
@@ -71,12 +72,10 @@ constexpr uint8_t SETUP_DUTY_STEP_PERCENT = 5U;
 constexpr uint16_t SETUP_DELAY_STEP_MS = 100U;
 constexpr uint32_t SETUP_DEFAULT_TOTAL_CYCLES = 30UL;
 constexpr uint16_t SETUP_DISPLAY_WRITE_INTERVAL_MS = 10U;
-// pressureTenths = (ADC * gain + offset) / calibrationScale.
+constexpr uint8_t PRESSURE_SENSOR_ZERO_SAMPLE_COUNT = 64U;
+// pressureTenths = (ADC - startupZero) * gain / calibrationScale.
 constexpr int32_t PRESSURE_SENSOR_GAIN_X10000[6] = {
     25274L, 25274L, 25274L, 25274L, 25274L, 25274L};
-constexpr int32_t PRESSURE_SENSOR_OFFSET_X10000[6] = {
-    -12927675L, -12927675L, -12927675L,
-    -12927675L, -12927675L, -12927675L};
 constexpr int32_t PRESSURE_SENSOR_CALIBRATION_SCALE = 10000L;
 }
 }

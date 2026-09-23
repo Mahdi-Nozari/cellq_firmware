@@ -85,14 +85,8 @@ void writeParameter(uint8_t group, uint8_t parameter) {
   } else if (parameter == 1U) {
     formatUnsignedTenths(text, draft_.frequencyTenthsHz[group]);
   } else if (parameter == 2U) {
-    uint32_t onTimeHundredths = 0;
-    if (draft_.frequencyTenthsHz[group] != 0U) {
-      onTimeHundredths =
-          (static_cast<uint32_t>(draft_.dutyPercent[group]) * 10UL +
-           draft_.frequencyTenthsHz[group] / 2U) /
-          draft_.frequencyTenthsHz[group];
-    }
-    formatHundredths(text, onTimeHundredths);
+    const uint8_t position = appendUnsigned(text, draft_.dutyPercent[group]);
+    text[position] = '\0';
   } else {
     formatHundredths(text, (draft_.delayMs[group] + 5UL) / 10UL);
   }
@@ -294,9 +288,6 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
     draft_.delayMs[group] = value;
   }
   writeParameter(group, parameter);
-  if (parameter == 1U) {
-    writeParameter(group, 2U);
-  }
 }
 
 void toggleChannel(uint8_t channel) {

@@ -24,6 +24,7 @@ static_assert(LABEL_CHANNEL_INTERVAL_MS > 0,
 int16_t pressureTenths_[cellq::hw::CHANNEL_COUNT] = {};
 bool pressureValid_[cellq::hw::CHANNEL_COUNT] = {};
 bool formVisible_ = false;
+bool streamActive_ = false;
 uint8_t displayedTestState_ = UINT8_MAX;
 uint8_t statusSyncChannel_ = cellq::hw::CHANNEL_COUNT;
 uint8_t scopeChannel_ = 0;
@@ -33,11 +34,40 @@ uint32_t lastScopeWriteMs_ = 0;
 uint32_t lastLabelWriteMs_ = 0;
 
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
+static_assert(cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT > 0U,
+              "Pressure zero sample count must be positive");
+static_assert(cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT <= 64U,
+              "Pressure zero sample count exceeds fixed-point range");
+
+uint32_t zeroAdcSum_[cellq::hw::CHANNEL_COUNT] = {};
+
 int32_t divideRounded(int32_t value, int32_t divisor) {
   if (value >= 0) {
     return (value + divisor / 2L) / divisor;
   }
   return (value - divisor / 2L) / divisor;
+}
+
+uint16_t readPressureAdc(uint8_t channel) {
+  analogRead(cellq::hw::PRESSURE_PINS[channel]);
+  return analogRead(cellq::hw::PRESSURE_PINS[channel]);
+}
+
+void calibratePressureZeros() {
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
+    analogRead(cellq::hw::PRESSURE_PINS[channel]);
+    uint32_t sum = 0;
+    for (uint8_t sample = 0;
+         sample < cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT;
+         ++sample) {
+      sum += analogRead(cellq::hw::PRESSURE_PINS[channel]);
+    }
+    zeroAdcSum_[channel] = sum;
+    const uint16_t average = static_cast<uint16_t>(
+        (sum + cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT / 2U) /
+        cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT);
+    DBG_MONITOR_ZERO(channel + 1U, average);
+  }
 }
 #endif
 
@@ -50,17 +80,19 @@ int16_t readPressureTenths(uint8_t channel) {
   }
   return cellq::square::channelPressureTenths(channel);
 #else
-  analogRead(cellq::hw::PRESSURE_PINS[channel]);
-  const uint16_t raw = analogRead(cellq::hw::PRESSURE_PINS[channel]);
+  const uint16_t raw = readPressureAdc(channel);
 
-  // Legacy 0.5-4.5 V, +/-15 psi curve. Coefficients are per channel.
-  const int32_t scaled =
+  // Honeywell 015PDAA5 slope with the per-channel boot zero removed.
+  const int32_t centered =
       static_cast<int32_t>(raw) *
-          cellq::config::PRESSURE_SENSOR_GAIN_X10000[channel] +
-      cellq::config::PRESSURE_SENSOR_OFFSET_X10000[channel];
+          cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT -
+      static_cast<int32_t>(zeroAdcSum_[channel]);
+  const int32_t scaled =
+      centered * cellq::config::PRESSURE_SENSOR_GAIN_X10000[channel];
   const int32_t tenths =
-      divideRounded(scaled,
-                    cellq::config::PRESSURE_SENSOR_CALIBRATION_SCALE);
+      divideRounded(
+          scaled, cellq::config::PRESSURE_SENSOR_CALIBRATION_SCALE *
+                      cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT);
   if (tenths < INT16_MIN) {
     return INT16_MIN;
   }
@@ -91,14 +123,17 @@ void sampleChannel(uint8_t channel) {
   pressureValid_[channel] = true;
 }
 
-void activate(uint32_t now) {
-  formVisible_ = true;
-  displayedTestState_ = UINT8_MAX;
-  statusSyncChannel_ = 0;
+void stopStream() {
+  streamActive_ = false;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
+    pressureValid_[channel] = false;
+  }
+}
+
+void startStream(uint32_t now) {
+  streamActive_ = true;
   scopeChannel_ = 0;
   labelChannel_ = 0;
-  lastDisplayWriteMs_ =
-      now - cellq::config::MONITOR_DISPLAY_WRITE_INTERVAL_MS;
   lastScopeWriteMs_ = now - SCOPE_CHANNEL_INTERVAL_MS;
   lastLabelWriteMs_ = now - LABEL_CHANNEL_INTERVAL_MS;
   for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
@@ -109,6 +144,23 @@ void activate(uint32_t now) {
 #else
   DBG_MONITOR_SOURCE("ANALOG");
 #endif
+}
+
+void deactivate() {
+  formVisible_ = false;
+  stopStream();
+}
+
+void activate(uint32_t now) {
+  formVisible_ = true;
+  streamActive_ = false;
+  displayedTestState_ = UINT8_MAX;
+  statusSyncChannel_ = 0;
+  lastDisplayWriteMs_ =
+      now - cellq::config::MONITOR_DISPLAY_WRITE_INTERVAL_MS;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
+    pressureValid_[channel] = false;
+  }
 }
 
 void refreshStatusState() {
@@ -156,8 +208,12 @@ namespace cellq {
 namespace monitor {
 void begin() {
   formVisible_ = false;
+  streamActive_ = false;
   displayedTestState_ = UINT8_MAX;
   statusSyncChannel_ = hw::CHANNEL_COUNT;
+#if !CELLQ_VIRTUAL_PRESSURE_SENSORS
+  calibratePressureZeros();
+#endif
 }
 
 void update(uint32_t now) {
@@ -165,12 +221,21 @@ void update(uint32_t now) {
     return;
   }
   refreshStatusState();
+  if (!square::isProcedureRunning()) {
+    if (streamActive_) {
+      stopStream();
+    }
+  } else if (!streamActive_) {
+    startStream(now);
+  }
   if (static_cast<uint32_t>(now - lastDisplayWriteMs_) <
       config::MONITOR_DISPLAY_WRITE_INTERVAL_MS) {
     return;
   }
   if (statusSyncChannel_ < hw::CHANNEL_COUNT) {
     writeNextStatus();
+  } else if (!streamActive_) {
+    return;
   } else if (static_cast<uint32_t>(now - lastScopeWriteMs_) >=
              SCOPE_CHANNEL_INTERVAL_MS) {
     writeNextScope(now);
@@ -184,13 +249,18 @@ void update(uint32_t now) {
 }
 
 void handleDisplayEvent(const display::Event &event, uint32_t now) {
-  if (event.object != gui::FORM_OBJECT) {
+  if (event.object == gui::FORM_OBJECT) {
+    if (event.index == gui::MONITOR_FORM) {
+      activate(now);
+    } else {
+      deactivate();
+    }
     return;
   }
-  if (event.index == gui::MONITOR_FORM) {
-    activate(now);
-  } else {
-    formVisible_ = false;
+  if (formVisible_ && event.object == gui::USERBUTTON_OBJECT &&
+      event.index == gui::MONITOR_SETUP_BUTTON &&
+      !square::isProcedureActive()) {
+    deactivate();
   }
 }
 

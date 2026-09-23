@@ -44,8 +44,8 @@ void setup() {
   cellq::clock::begin();
   cellq::square::begin();
   cellq::setup::begin();
-  cellq::monitor::begin();
   cellq::display::begin();
+  cellq::monitor::begin();
   cellq::preset::begin();
   DBG_BOOT();
 }

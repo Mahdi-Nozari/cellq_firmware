@@ -75,7 +75,8 @@ PresetSelectDestination presetSelectDestination_ =
     PresetSelectDestination::Run;
 bool presetLoaded_ = false;
 bool presetPageSynchronized_ = false;
-bool pauseAtCycleBoundary_ = false;
+bool pauseAtCycleBoundary_ =
+    cellq::config::SQUARE_PAUSE_AT_CYCLE_DEFAULT;
 uint8_t progressGroup_ = 0;
 uint32_t completedCycles_[GROUP_COUNT] = {};
 uint64_t remainingTimeMs_[GROUP_COUNT] = {};
@@ -408,13 +409,12 @@ void writeProgress() {
   if (progress == displayedProgress_) {
     return;
   }
-  char text[5];
+  char text[4];
   if (progress == PROGRESS_BLANK) {
     text[0] = '\0';
   } else {
-    uint8_t position =
+    const uint8_t position =
         appendUnsigned(text, static_cast<uint16_t>(progress));
-    text[position++] = '%';
     text[position] = '\0';
   }
   cellq::display::setSquareLabel(cellq::gui::SQUARE_PROGRESS_LABEL, text);
@@ -618,11 +618,11 @@ void writeGroupParameter(uint8_t group, uint8_t parameter) {
   const uint8_t labels[GROUP_COUNT][4] = {
       {cellq::gui::SQUARE_GROUP_1_PRESSURE_LABEL,
        cellq::gui::SQUARE_GROUP_1_FREQUENCY_LABEL,
-       cellq::gui::SQUARE_GROUP_1_ON_TIME_LABEL,
+       cellq::gui::SQUARE_GROUP_1_DUTY_LABEL,
        cellq::gui::SQUARE_GROUP_1_DELAY_LABEL},
       {cellq::gui::SQUARE_GROUP_2_PRESSURE_LABEL,
        cellq::gui::SQUARE_GROUP_2_FREQUENCY_LABEL,
-       cellq::gui::SQUARE_GROUP_2_ON_TIME_LABEL,
+       cellq::gui::SQUARE_GROUP_2_DUTY_LABEL,
        cellq::gui::SQUARE_GROUP_2_DELAY_LABEL}};
   char text[16];
   if (parameter == 0U) {
@@ -630,14 +630,9 @@ void writeGroupParameter(uint8_t group, uint8_t parameter) {
   } else if (parameter == 1U) {
     formatUnsignedTenths(text, activePreset_.frequencyTenthsHz[group]);
   } else if (parameter == 2U) {
-    uint32_t onTimeHundredths = 0;
-    if (activePreset_.frequencyTenthsHz[group] != 0U) {
-      onTimeHundredths =
-          (static_cast<uint32_t>(activePreset_.dutyPercent[group]) * 10UL +
-           activePreset_.frequencyTenthsHz[group] / 2U) /
-          activePreset_.frequencyTenthsHz[group];
-    }
-    formatHundredths(text, onTimeHundredths);
+    const uint8_t position =
+        appendUnsigned(text, activePreset_.dutyPercent[group]);
+    text[position] = '\0';
   } else {
     formatHundredths(text, (activePreset_.delayMs[group] + 5UL) / 10UL);
   }
@@ -912,7 +907,7 @@ void begin() {
   presetSelectDestination_ = PresetSelectDestination::Run;
   presetLoaded_ = false;
   presetPageSynchronized_ = false;
-  pauseAtCycleBoundary_ = false;
+  pauseAtCycleBoundary_ = config::SQUARE_PAUSE_AT_CYCLE_DEFAULT;
   displayedProgress_ = PROGRESS_NOT_SENT;
   displaySyncPending_ = false;
   scopePreviewPending_ = false;
@@ -1040,6 +1035,10 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
 
 bool isProcedureActive() {
   return procedureActive();
+}
+
+bool isProcedureRunning() {
+  return procedureAdvancing();
 }
 
 bool isChannelEnabled(uint8_t channel) {

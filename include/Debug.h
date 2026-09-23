@@ -111,6 +111,16 @@
     }                                                                         \
   } while (0)
 
+#define DBG_MONITOR_ZERO(c, v)                                                \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 24) {                                   \
+      Serial.print(F("D,MON,Z,"));                                           \
+      Serial.print(c);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(v);                                                      \
+    }                                                                         \
+  } while (0)
+
 #define DBG_SD_OK()                                                           \
   do {                                                                        \
     if (Serial.availableForWrite() >= 10) {                                   \
@@ -224,6 +234,7 @@
 #define DBG_MANUAL_SYNC() do { } while (0)
 #define DBG_MONITOR_PRESSURE(c, v) do { } while (0)
 #define DBG_MONITOR_SOURCE(message) do { } while (0)
+#define DBG_MONITOR_ZERO(c, v) do { } while (0)
 #define DBG_SD_OK() do { } while (0)
 #define DBG_SD_FAIL() do { } while (0)
 #define DBG_PRESET_LOAD(i, r) do { } while (0)

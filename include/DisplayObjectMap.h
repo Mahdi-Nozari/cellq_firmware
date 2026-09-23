@@ -37,14 +37,14 @@ constexpr uint8_t MONITOR_SCOPE_LAST = 6;
 constexpr uint8_t SQUARE_NAME_LABEL = 14;
 constexpr uint8_t SQUARE_GROUP_2_PRESSURE_LABEL = 15;
 constexpr uint8_t SQUARE_GROUP_2_FREQUENCY_LABEL = 16;
-constexpr uint8_t SQUARE_GROUP_2_ON_TIME_LABEL = 17;
+constexpr uint8_t SQUARE_GROUP_2_DUTY_LABEL = 17;
 constexpr uint8_t SQUARE_GROUP_2_DELAY_LABEL = 18;
 constexpr uint8_t SQUARE_REMAINING_TIME_LABEL[2] = {19, 20};
 constexpr uint8_t SQUARE_REMAINING_CYCLES_LABEL[2] = {21, 22};
 constexpr uint8_t SQUARE_PROGRESS_LABEL = 24;
 constexpr uint8_t SQUARE_GROUP_1_PRESSURE_LABEL = 25;
 constexpr uint8_t SQUARE_GROUP_1_FREQUENCY_LABEL = 26;
-constexpr uint8_t SQUARE_GROUP_1_ON_TIME_LABEL = 27;
+constexpr uint8_t SQUARE_GROUP_1_DUTY_LABEL = 27;
 constexpr uint8_t SQUARE_GROUP_1_DELAY_LABEL = 28;
 constexpr uint8_t SQUARE_CHANNEL_IMAGE_FIRST = 6;
 constexpr uint8_t SQUARE_CHANNEL_IMAGE_LAST = 11;
@@ -67,9 +67,9 @@ constexpr uint8_t SETUP_NAME_LABEL = 36;
 constexpr uint8_t SETUP_PARAMETER_LABEL[2][4] = {
     {23, 29, 30, 31}, {32, 33, 34, 35}};
 constexpr uint8_t SETUP_INCREASE_BUTTON[2][4] = {
-    {36, 37, 38, 39}, {43, 42, 41, 40}};
-constexpr uint8_t SETUP_DECREASE_BUTTON[2][4] = {
     {44, 45, 46, 47}, {48, 49, 50, 51}};
+constexpr uint8_t SETUP_DECREASE_BUTTON[2][4] = {
+    {36, 37, 38, 39}, {43, 42, 41, 40}};
 constexpr uint8_t SETUP_NEW_BUTTON = 54;
 constexpr uint8_t SETUP_SAVE_BUTTON = 55;
 constexpr uint8_t SETUP_DELETE_BUTTON = 56;

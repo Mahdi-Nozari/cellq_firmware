@@ -45,6 +45,7 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
 | `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
 | `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
+| `D,MON,Z,<channel>,<adc>` | A physical sensor's averaged startup ADC value was stored as its 0 kPa reference. |
 | `D,SD,OK` | SD card initialization on D10 succeeded at boot. |
 | `D,SD,FAIL` | SD card initialization failed; both compiled factory presets remain available. |
 | `D,PR,LOAD,<id>,<revision>` | The SD preset passed all parsing, range, and CRC checks. |
@@ -197,8 +198,8 @@ Any reported activation of another form disables monitor sampling and writes.
 | LCD object | Index | Function |
 |---|---:|---|
 | Form | 4 | Load factory preset 1 into the setup draft |
-| Userbutton | 36-39 / 44-47 | Group 1 pressure, frequency, ON time, and delay increase/decrease |
-| Userbutton | 43,42,41,40 / 48-51 | Group 2 pressure, frequency, ON time, and delay increase/decrease |
+| Userbutton | 36-39 / 44-47 | Group 1 pressure, frequency, duty, and delay decrease/increase |
+| Userbutton | 43,42,41,40 / 48-51 | Group 2 pressure, frequency, duty, and delay decrease/increase |
 | Userbutton | 52 | Open Form 6 to edit an existing user-preset draft name |
 | Userbutton | 53 | Open the shared Form 7 selector and discard the current unsaved draft |
 | Userbutton | 54 | Create a new draft using the lowest vacant ID |
@@ -283,11 +284,19 @@ Example:
 D,MON,P,2,-21
 ```
 
-This means channel 2 measured `-2.1 kPa` and that value was sent to ILabelB9. Messages follow the 2 Hz label rate, not the faster scope-sample rate. They stop when Form 3 is hidden.
+This means channel 2 measured `-2.1 kPa` and that value was sent to ILabelB9. Messages follow the 2 Hz label rate, not the faster scope-sample rate. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error.
 
-All channels currently use the legacy 0.5-4.5 V, +/-15 psi conversion with the default 5 V ADC reference. Separate fixed-point gain and offset entries exist in `BuildConfig.h` for later individual calibration. The values are measurements only; they are not currently used for feedback control or a safety interlock.
+All channels are Honeywell 015PDAA5 sensors and use the same 0.5-4.5 V, +/-15 psi slope with the default 5 V ADC reference. In physical-sensor mode, firmware averages 64 readings for each channel at boot and stores that average as its per-boot 0 kPa reference. The resulting values are measurements only; they are not currently used for feedback control or a safety interlock.
 
-When virtual sensors are enabled, an active preset channel reports its assigned preset pressure while its valve output is ON and `0.0 kPa` while OFF. Suppressed channels and inactive tests report `0.0 kPa`. The source message printed on Form 3 activation confirms which path is active.
+Startup zeroing reports one line per channel, for example:
+
+```text
+D,MON,Z,1,512
+```
+
+This means channel 1's averaged startup reading was ADC count 512. These lines are absent when virtual sensors are enabled. Any actual differential pressure present during startup is intentionally included in the zero correction.
+
+When virtual sensors are enabled, an active preset channel reports its assigned preset pressure while its valve output is ON and `0.0 kPa` while OFF. Suppressed channels report `0.0 kPa`. The source message printed when Form 3 pressure streaming starts confirms which path is active.
 
 ## Time-setting message
 
@@ -353,7 +362,7 @@ LCD label writes contain only the numeric values. The `kPa` and `s` units are st
 
 The stored Manual defaults are:
 
-- Pressure: `-80.0 kPa` for both regulators
+- Pressure: `0.0 kPa` for both regulators
 - Valve time: `0 s` for all six channels
 
 This message confirms that the write functions were called. Visual confirmation on the LCD still depends on the correct Workshop label indices, display baud rate, serial wiring, and Report Event configuration.
@@ -374,8 +383,8 @@ Each DAC is commanded to the zero/safe code at startup. Manual pressure defaults
 
 ```text
 D,E,<cmd>,<form-object>,1,<value>
-D,DAC,1,3995,<result>
-D,DAC,2,3995,<result>
+D,DAC,1,0,<result>
+D,DAC,2,0,<result>
 D,M,SYNC
 ```
 
@@ -483,7 +492,7 @@ D,DAC,2,0,1
 D,SW,DONE
 ```
 
-The `99` DAC code corresponds to the preset's `-2.0 kPa` command under the confirmed 0-82 kPa conversion. Cycle progress is intentionally not printed every cycle.
+The `99` DAC code corresponds to the preset's `-2.0 kPa` command under the confirmed 0-82 kPa conversion. Cycle progress is intentionally not printed every cycle. ILabelB24 receives only the integer value from `0` through `100`; the firmware does not transmit a percent sign.
 
 During display-only testing without DACs, the start sequence instead includes:
 
@@ -497,6 +506,8 @@ D,SW,START
 This warning is expected when `CELLQ_REQUIRE_DAC_ACK=0`. It confirms that the procedure is continuing for GUI testing even though neither DAC acknowledged the commands.
 
 ### Pausing and continuing
+
+ISwitch7 defaults ON at firmware startup, so cycle-boundary pausing is the default behavior. Form 2 synchronization writes this state to the display switch.
 
 With ISwitch7 OFF, the procedure pauses immediately:
 
