@@ -193,5 +193,9 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
     formVisible_ = false;
   }
 }
+
+int16_t sampleChannelPressureTenths(uint8_t channel) {
+  return channel < hw::CHANNEL_COUNT ? readPressureTenths(channel) : 0;
+}
 }
 }

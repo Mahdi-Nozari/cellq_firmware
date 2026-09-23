@@ -638,6 +638,10 @@ void begin() {
   }
 }
 
+bool isSdAvailable() {
+  return sdAvailable_;
+}
+
 bool findPreset(uint16_t id, SquareWavePreset &preset) {
   return findPresetInternal(id, preset) == ParseError::None;
 }

@@ -56,6 +56,7 @@ constexpr uint8_t SQUARE_PRESET_SELECT_BUTTON = 30;
 constexpr uint8_t SQUARE_SETUP_BUTTON = 24;
 constexpr uint8_t MONITOR_SETUP_BUTTON = 26;
 constexpr uint8_t SQUARE_PAUSE_AT_CYCLE_SWITCH = 7;
+constexpr uint8_t SQUARE_DATA_LOG_SWITCH = 6;
 constexpr uint8_t SQUARE_GROUP_SCOPE[2] = {0, 7};
 constexpr uint8_t PRESET_SELECT_FORM = 7;
 constexpr uint8_t PRESET_SELECT_NAME_LABEL_FIRST = 46;

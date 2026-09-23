@@ -2,6 +2,7 @@
 #include <avr/pgmspace.h>
 #include <string.h>
 #include "BuildConfig.h"
+#include "DataLogger.h"
 #include "Debug.h"
 #include "DisplayObjectMap.h"
 #include "HardwareConfig.h"
@@ -22,6 +23,7 @@ enum class ProcedureState : uint8_t {
 };
 
 enum class PresetSelectDestination : uint8_t { Run, Setup };
+enum class FailureCause : uint8_t { Preset, Dac, Logging };
 
 constexpr uint8_t GROUP_COUNT = cellq::hw::REGULATOR_COUNT;
 const cellq::SquareWavePreset FACTORY_PRESET_1 PROGMEM = {
@@ -54,8 +56,8 @@ constexpr uint8_t STATUS_RUNNING_IMAGE = 1;
 constexpr uint8_t STATUS_DONE_IMAGE = 2;
 constexpr uint8_t STATUS_ERROR_IMAGE = 3;
 constexpr uint8_t STATUS_PAUSED_IMAGE = 4;
-constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 24;
-constexpr uint8_t RUNTIME_DISPLAY_SYNC_STEP_COUNT = 9;
+constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 25;
+constexpr uint8_t RUNTIME_DISPLAY_SYNC_STEP_COUNT = 10;
 constexpr int16_t PROGRESS_NOT_SENT = -2;
 constexpr int16_t PROGRESS_BLANK = -1;
 constexpr char UNAVAILABLE_PRESET_NAME[] = "---";
@@ -317,6 +319,16 @@ bool procedureAdvancing() {
          state_ == ProcedureState::PausePending;
 }
 
+cellq::logger::State loggerState() {
+  if (state_ == ProcedureState::PausePending) {
+    return cellq::logger::State::PausePending;
+  }
+  if (state_ == ProcedureState::Paused) {
+    return cellq::logger::State::Paused;
+  }
+  return cellq::logger::State::Running;
+}
+
 void idleOutputs() {
   cellq::waveform::stop();
   cellq::regulator::idle();
@@ -423,8 +435,15 @@ void writeAllCountdowns() {
   }
 }
 
-void stopProcedure(bool updateDisplay) {
+void failProcedure(FailureCause cause, uint32_t now);
+
+void stopProcedure(bool updateDisplay, uint32_t now) {
   idleOutputs();
+  if (!cellq::logger::finish(now, cellq::logger::EndReason::Stopped,
+                             completedCycles_)) {
+    failProcedure(FailureCause::Logging, now);
+    return;
+  }
   state_ = ProcedureState::Idle;
   resetCountdowns();
   if (updateDisplay) {
@@ -434,13 +453,18 @@ void stopProcedure(bool updateDisplay) {
   DBG_SQUARE("STOP");
 }
 
-void finishProcedure() {
+void finishProcedure(uint32_t now) {
   cellq::regulator::idle();
-  state_ = ProcedureState::Done;
   for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
     completedCycles_[group] = activePreset_.totalCycles[group];
     remainingTimeMs_[group] = 0;
   }
+  if (!cellq::logger::finish(now, cellq::logger::EndReason::Done,
+                             completedCycles_)) {
+    failProcedure(FailureCause::Logging, now);
+    return;
+  }
+  state_ = ProcedureState::Done;
   if (form2Visible_) {
     writeAllCountdowns();
     writeProcedureState();
@@ -448,16 +472,29 @@ void finishProcedure() {
   DBG_SQUARE("DONE");
 }
 
-void failProcedure(bool dacFailure) {
+void failProcedure(FailureCause cause, uint32_t now) {
   idleOutputs();
+  if (cause == FailureCause::Logging) {
+    cellq::logger::abort();
+  } else if (!cellq::logger::finish(
+                 now, cellq::logger::EndReason::Error,
+                 completedCycles_)) {
+    cellq::logger::abort();
+    cause = FailureCause::Logging;
+  }
   state_ = ProcedureState::Error;
   resetCountdowns();
   if (form2Visible_) {
+    if (cause == FailureCause::Logging) {
+      cellq::display::setSquareDataLogSwitch(false);
+    }
     writeAllCountdowns();
     writeProcedureState();
   }
-  if (dacFailure) {
+  if (cause == FailureCause::Dac) {
     DBG_SQUARE("ERR,DAC");
+  } else if (cause == FailureCause::Logging) {
+    DBG_SQUARE("ERR,LOG");
   } else {
     DBG_SQUARE("ERR,PRESET");
   }
@@ -487,7 +524,11 @@ void updateRuntimeDisplay(uint32_t now) {
 
 void startProcedure(uint32_t now) {
   if (!presetLoaded_ || !presetValid(activePreset_)) {
-    failProcedure(false);
+    failProcedure(FailureCause::Preset, now);
+    return;
+  }
+  if (!cellq::logger::startTest(activePreset_, now)) {
+    failProcedure(FailureCause::Logging, now);
     return;
   }
   bool regulatorsOk = true;
@@ -498,7 +539,7 @@ void startProcedure(uint32_t now) {
   }
   if (!regulatorsOk) {
 #if CELLQ_REQUIRE_DAC_ACK
-    failProcedure(true);
+    failProcedure(FailureCause::Dac, now);
     return;
 #else
     DBG_SQUARE("WARN,DAC,IGNORED");
@@ -513,7 +554,7 @@ void startProcedure(uint32_t now) {
         activePreset_.totalCycles[group]};
   }
   if (!cellq::waveform::start(waveformConfig)) {
-    failProcedure(false);
+    failProcedure(FailureCause::Preset, now);
     return;
   }
   state_ = ProcedureState::Running;
@@ -643,6 +684,9 @@ void writeFullDisplaySyncStep() {
       cellq::display::setSquarePauseAtCycleSwitch(
           pauseAtCycleBoundary_);
       break;
+    case 23:
+      cellq::display::setSquareDataLogSwitch(cellq::logger::enabled());
+      break;
     default:
       writeProgress();
       break;
@@ -672,6 +716,9 @@ void writeRuntimeDisplaySyncStep() {
     case 7:
       cellq::display::setSquarePauseAtCycleSwitch(
           pauseAtCycleBoundary_);
+      break;
+    case 8:
+      cellq::display::setSquareDataLogSwitch(cellq::logger::enabled());
       break;
     default:
       writeProgress();
@@ -858,6 +905,7 @@ namespace cellq {
 namespace square {
 void begin() {
   waveform::begin();
+  logger::begin();
   state_ = ProcedureState::Idle;
   form2Visible_ = false;
   presetSelectVisible_ = false;
@@ -880,7 +928,7 @@ void update(uint32_t now) {
       for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
         waveform::takeGroupFinished(group);
       }
-      finishProcedure();
+      finishProcedure(now);
     } else {
       for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
         if (waveform::takeGroupFinished(group)) {
@@ -894,6 +942,10 @@ void update(uint32_t now) {
         updateRuntimeDisplay(now);
       }
     }
+  }
+  if (procedureActive() &&
+      !logger::update(now, loggerState(), completedCycles_)) {
+    failProcedure(FailureCause::Logging, now);
   }
   if (presetSelectVisible_) {
     scanNextPresetSlot(now);
@@ -951,6 +1003,13 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
     pauseAtCycleBoundary_ = event.value != 0U;
     return;
   }
+  if (event.object == gui::ISWITCH_OBJECT &&
+      event.index == gui::SQUARE_DATA_LOG_SWITCH) {
+    if (!logger::setEnabled(event.value != 0U, now)) {
+      failProcedure(FailureCause::Logging, now);
+    }
+    return;
+  }
   if (event.object != gui::USERBUTTON_OBJECT) {
     return;
   }
@@ -964,7 +1023,7 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   }
   if (event.index == gui::SQUARE_START_BUTTON) {
     if (procedureActive()) {
-      stopProcedure(true);
+      stopProcedure(true, now);
     } else {
       startProcedure(now);
     }

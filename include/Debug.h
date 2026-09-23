@@ -203,6 +203,14 @@
       Serial.println(F(message));                                             \
     }                                                                         \
   } while (0)
+
+#define DBG_LOG(message)                                                      \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 24) {                                   \
+      Serial.print(F("D,LOG,"));                                             \
+      Serial.println(F(message));                                             \
+    }                                                                         \
+  } while (0)
 #else
 #define DBG_BEGIN() do { } while (0)
 #define DBG_BOOT() do { } while (0)
@@ -227,4 +235,5 @@
 #define DBG_PRESET_SAVE(i, r) do { } while (0)
 #define DBG_PRESET_DELETE(i) do { } while (0)
 #define DBG_RTC(message) do { } while (0)
+#define DBG_LOG(message) do { } while (0)
 #endif

@@ -25,6 +25,7 @@ void setSquarePresetReady(bool ready);
 void setSquareStartButton(bool stopImage);
 void setSquarePauseButton(bool continueImage);
 void setSquarePauseAtCycleSwitch(bool enabled);
+void setSquareDataLogSwitch(bool enabled);
 void addSquareScopeSample(uint8_t group, uint16_t value);
 void setPresetSelectName(uint8_t slot, const char *text);
 void setSquareSetupLabel(uint8_t index, const char *text);

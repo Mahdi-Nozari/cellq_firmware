@@ -196,6 +196,11 @@ void setSquarePauseAtCycleSwitch(bool enabled) {
                     enabled ? 1 : 0);
 }
 
+void setSquareDataLogSwitch(bool enabled) {
+  genie.WriteObject(gui::ISWITCH_OBJECT, gui::SQUARE_DATA_LOG_SWITCH,
+                    enabled ? 1 : 0);
+}
+
 void addSquareScopeSample(uint8_t group, uint16_t value) {
   if (group >= hw::REGULATOR_COUNT || value > 100U) {
     return;

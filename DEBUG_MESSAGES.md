@@ -68,6 +68,13 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SET,LOCKED` | Setup navigation was rejected because a test is active. |
 | `D,SET,EDIT,READONLY` | An edit was attempted while a factory preset was displayed. |
 | `D,SET,SAVE,READONLY` / `DELETE,READONLY` | Save or delete was attempted for a factory preset. |
+| `D,LOG,ARM,1` / `ARM,0` | ISwitch6 armed or disarmed logging while no test was active. |
+| `D,LOG,OPEN` | A new CSV file and its metadata header were created. |
+| `D,LOG,ON` | Logging started or resumed for the current test. |
+| `D,LOG,OFF` | A `LOGGING_OFF` event was flushed and the current file was closed. |
+| `D,LOG,END` | The final END record was flushed and the log closed successfully. |
+| `D,LOG,ABORT` | Logging was abandoned after an SD failure and ISwitch6 was disabled in firmware. |
+| `D,LOG,ERR,<code>` | A data-log operation failed; see the logging error table below. |
 | `D,SW,LOAD,1,SD` | Square-wave preset 1 was committed from the SD file. |
 | `D,SW,LOAD,<id>,FLASH` | The matching compiled factory preset fallback was loaded. |
 | `D,SW,CACHE,<id>` | Form 2 reused the active preset from RAM without reading the SD card. |
@@ -84,6 +91,7 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,WARN,DAC,IGNORED` | A DAC did not acknowledge, but the procedure continued because DAC acknowledgment enforcement is disabled. |
 | `D,SW,ERR,DAC` | A regulator DAC command failed while starting the procedure. |
 | `D,SW,ERR,PRESET` | A preset failed the firmware pressure, frequency, or duty validation before starting. |
+| `D,SW,ERR,LOG` | A data-log operation failed. The procedure stopped, outputs returned to idle, UserImages12 changed to ERROR, and logging was disabled. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
 
@@ -104,6 +112,20 @@ All regulator and channel numbers in the action messages are human-readable and 
 | `SAVE` | The target A/B file could not be prepared or fully written. |
 | `VERIFY` | The newly written file failed full parse/CRC readback and was removed. |
 | `DELETE` | One of the preset's A/B files could not be removed. |
+
+### Data-logging error codes
+
+| Code | Meaning |
+|---|---|
+| `PATH` | `/DATA`, its date directory, or a unique 8.3 filename could not be prepared. |
+| `HEADER` | The new file could not be opened or its metadata header could not be written. |
+| `REOPEN` | A mid-test re-enable could not reopen the existing file. |
+| `EVENT` | A `LOGGING_ON` event could not be written. |
+| `WRITE` | A scheduled 20 Hz sample could not be written. |
+| `FLUSH` | The one-second periodic flush failed. |
+| `CLOSE` | The `LOGGING_OFF` event or its flush failed. |
+| `FINALOPEN` | The closed test file could not be reopened to append END. |
+| `FINAL` | The END record or final flush failed. |
 
 ## Boot message
 
@@ -156,6 +178,7 @@ Form 0 also reports activation. Moving from Manual Form 1 to Form 0 hides the Ma
 | Userbutton | 27 | Start or stop the procedure |
 | Userbutton | 28 | Pause or continue the procedure |
 | Userbutton | 30 | Request preset-selection Form 7 while stopped |
+| ISwitch | 6 | Arm logging, start it during a test, or stop it without stopping the test |
 
 ### Current monitor event indices
 
@@ -368,6 +391,43 @@ D,SW,READY
 This is the successful SD sequence for revision 1. UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by 32 samples for group 1 on Scope0 and 32 samples for group 2 on Scope7. Both scopes should use Xmag 10 and RefreshIncrement 32 in Workshop. `D,SW,READY` appears and UserImages13 changes to image 1 only after both previews finish. This indicates that the page data is ready; it does not verify physical hardware.
 
 If the SD file is unavailable or invalid, `D,PR,ERR,1,<code>` and `D,SW,LOAD,1,FLASH` appear instead. The page still loads the compiled preset and becomes ready.
+
+### Data logging
+
+Turning ISwitch6 ON while idle arms the next test:
+
+```text
+D,LOG,ARM,1
+```
+
+When the test starts, or when ISwitch6 is turned ON during an active test, a new file is created if necessary and logging begins:
+
+```text
+D,LOG,OPEN
+D,LOG,ON
+```
+
+Turning ISwitch6 OFF during the test writes and flushes a `LOGGING_OFF` event. The test continues:
+
+```text
+D,LOG,OFF
+```
+
+Turning it ON again appends to the same file and reports `D,LOG,ON` without another `OPEN`. A normal Done, Stop, or non-logging Error appends the END record and reports:
+
+```text
+D,LOG,END
+```
+
+Samples are intentionally not printed to USB serial. Their fixed 20 Hz rate is independent of the slower display-monitor rate. If an SD operation fails, the logger reports its specific error followed by an abort and procedure error, for example:
+
+```text
+D,LOG,ERR,WRITE
+D,LOG,ABORT
+D,SW,ERR,LOG
+```
+
+At that point all outputs are idle, UserImages12 shows ERROR image 3, and the logging switch is disabled in firmware.
 
 ### Opening Form 7 and selecting a preset
 
