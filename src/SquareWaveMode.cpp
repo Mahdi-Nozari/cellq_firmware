@@ -53,6 +53,7 @@ constexpr uint8_t STATUS_IDLE_IMAGE = 0;
 constexpr uint8_t STATUS_RUNNING_IMAGE = 1;
 constexpr uint8_t STATUS_DONE_IMAGE = 2;
 constexpr uint8_t STATUS_ERROR_IMAGE = 3;
+constexpr uint8_t STATUS_PAUSED_IMAGE = 4;
 constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 24;
 constexpr uint8_t RUNTIME_DISPLAY_SYNC_STEP_COUNT = 9;
 constexpr int16_t PROGRESS_NOT_SENT = -2;
@@ -293,8 +294,9 @@ uint8_t statusImage() {
   switch (state_) {
     case ProcedureState::Running:
     case ProcedureState::PausePending:
-    case ProcedureState::Paused:
       return STATUS_RUNNING_IMAGE;
+    case ProcedureState::Paused:
+      return STATUS_PAUSED_IMAGE;
     case ProcedureState::Done:
       return STATUS_DONE_IMAGE;
     case ProcedureState::Error:
@@ -532,6 +534,7 @@ void pauseProcedure() {
   cellq::waveform::pause();
   refreshRuntimeSnapshot();
   state_ = ProcedureState::Paused;
+  cellq::display::setSquareStatus(statusImage());
   cellq::display::setSquarePauseButton(true);
   writeProgress();
   DBG_SQUARE("PAUSE");
@@ -542,6 +545,7 @@ void completeBoundaryPause() {
   state_ = ProcedureState::Paused;
   if (form2Visible_) {
     writeAllCountdowns();
+    cellq::display::setSquareStatus(statusImage());
     cellq::display::setSquarePauseButton(true);
     writeProgress();
   }
@@ -552,6 +556,7 @@ void resumeProcedure(uint32_t now) {
   cellq::waveform::resume();
   state_ = ProcedureState::Running;
   lastRuntimeDisplayMs_ = now;
+  cellq::display::setSquareStatus(statusImage());
   cellq::display::setSquarePauseButton(false);
   writeProgress();
   DBG_SQUARE("RESUME");

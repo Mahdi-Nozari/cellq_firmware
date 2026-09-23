@@ -169,7 +169,7 @@ void setSquareChannelEnabled(uint8_t channel, bool enabled) {
 }
 
 void setSquareStatus(uint8_t image) {
-  if (image > 3U) {
+  if (image > 4U) {
     return;
   }
   genie.WriteObject(gui::USERIMAGES_OBJECT, gui::SQUARE_STATUS_IMAGE, image);

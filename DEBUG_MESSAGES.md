@@ -76,8 +76,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,SELECT,SETUP` | A Form 7 selection was routed back to Form 4 rather than committed as the active run preset. |
 | `D,SW,READY` | The required Form 2 synchronization completed and UserImages13 changed to image 1. The first load includes static fields plus Scope0 and Scope7; later active-state returns include only runtime fields. |
 | `D,SW,START` | The Square-wave procedure started. |
-| `D,SW,PAUSE,WAIT` | ISwitch7 was ON, so a cycle-boundary pause was requested. Each unfinished group is still completing its current cycle. |
-| `D,SW,PAUSE` | The Square-wave procedure is fully paused. With immediate pause, valve phases are preserved; with cycle-boundary pause, both groups are OFF at their boundaries. Regulators remain active. |
+| `D,SW,PAUSE,WAIT` | ISwitch7 was ON, so a cycle-boundary pause was requested. Each unfinished group is still completing its current cycle and UserImages12 remains at running image 1. |
+| `D,SW,PAUSE` | The Square-wave procedure is fully paused and UserImages12 uses image 4. With immediate pause, valve phases are preserved; with cycle-boundary pause, both groups are OFF at their boundaries. Regulators remain active. |
 | `D,SW,RESUME` | The paused Square-wave procedure resumed. |
 | `D,SW,STOP` | The Square-wave procedure stopped and outputs returned to idle. |
 | `D,SW,DONE` | Both finite groups completed their configured total cycle counts. |
