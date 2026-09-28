@@ -51,12 +51,8 @@ void setup() {
 }
 
 void loop() {
-  const uint32_t now = millis();
-  cellq::manual::update(now);
-  cellq::square::update(now);
-  cellq::setup::update(now);
-  cellq::monitor::update(now);
   cellq::display::service();
+  cellq::display::beginEventUpdate();
   cellq::display::Event event;
   while (cellq::display::nextEvent(event)) {
     const uint32_t eventTime = millis();
@@ -67,5 +63,11 @@ void loop() {
       cellq::manual::handleDisplayEvent(event, eventTime);
     }
   }
+  cellq::display::endEventUpdate();
+  const uint32_t now = millis();
+  cellq::manual::update(now);
+  cellq::square::update(now);
+  cellq::setup::update(now);
+  cellq::monitor::update(now);
   updateChannel1Led();
 }

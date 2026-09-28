@@ -36,6 +36,26 @@
     }                                                                         \
   } while (0)
 
+#define DBG_LCD_RETRY(c, i)                                                   \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 28) {                                   \
+      Serial.print(F("D,LCD,RETRY,"));                                        \
+      Serial.print(c);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(i);                                                      \
+    }                                                                         \
+  } while (0)
+
+#define DBG_LCD_DROP(c, i)                                                    \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 28) {                                   \
+      Serial.print(F("D,LCD,DROP,"));                                         \
+      Serial.print(c);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(i);                                                      \
+    }                                                                         \
+  } while (0)
+
 #define DBG_PRESSURE(r, v)                                                    \
   do {                                                                        \
     if (Serial.availableForWrite() >= 24) {                                   \
@@ -226,6 +246,8 @@
 #define DBG_BOOT() do { } while (0)
 #define DBG_EVENT(c, o, i, v) do { } while (0)
 #define DBG_EVENT_DROP() do { } while (0)
+#define DBG_LCD_RETRY(c, i) do { } while (0)
+#define DBG_LCD_DROP(c, i) do { } while (0)
 #define DBG_PRESSURE(r, v) do { } while (0)
 #define DBG_DAC(r, c, o) do { } while (0)
 #define DBG_TIME(c, v) do { } while (0)

@@ -11,6 +11,8 @@ struct Event {
 
 void begin();
 void service();
+void beginEventUpdate();
+void endEventUpdate();
 bool nextEvent(Event &event);
 void setManualSwitch(uint8_t channel, bool on);
 void setManualPressureLabel(uint8_t regulator, int16_t tenths);

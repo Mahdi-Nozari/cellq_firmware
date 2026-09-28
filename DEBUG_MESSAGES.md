@@ -15,7 +15,7 @@ This guide describes the USB serial debug messages currently produced by the Cel
 ```cpp
 #define CELLQ_DEBUG 1
 #define CELLQ_REQUIRE_DAC_ACK 0
-#define CELLQ_VIRTUAL_PRESSURE_SENSORS 1
+#define CELLQ_VIRTUAL_PRESSURE_SENSORS 0
 #define CELLQ_LOAD_FACTORY_PRESET_FROM_SD 1
 ```
 
@@ -36,6 +36,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,BOOT,OK` | Firmware setup completed. |
 | `D,E,<cmd>,<object>,<index>,<value>` | A raw event was received from the display. |
 | `D,E,DROP` | The display event queue was full, so an event was discarded. |
+| `D,LCD,RETRY,<command>,<index>` | The display did not acknowledge a command within 250 ms, or returned NAK. Firmware queued one retry. Command `1` is an object/image/switch write; `12` is a label write. |
+| `D,LCD,DROP,<command>,<index>` | A display command was discarded after a failed retry, because newer navigation took priority, because the transmit queue filled, or because label text exceeded 20 characters. Repeated messages indicate a communication problem; report any missing label. |
 | `D,P,<regulator>,<tenths>` | A manual pressure setting changed. |
 | `D,DAC,<regulator>,<code>,<result>` | An MCP4725 command was attempted. |
 | `D,T,<channel>,<seconds>` | A manual valve time setting changed. |

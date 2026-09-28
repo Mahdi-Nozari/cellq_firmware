@@ -57,8 +57,6 @@ constexpr uint8_t STATUS_DONE_IMAGE = 2;
 constexpr uint8_t STATUS_ERROR_IMAGE = 3;
 constexpr uint8_t STATUS_PAUSED_IMAGE = 4;
 constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 27;
-constexpr uint8_t DISPLAY_SYNC_PASS_COUNT = 2;
-constexpr uint8_t READY_WRITE_COUNT = 2;
 constexpr int16_t PROGRESS_NOT_SENT = -2;
 constexpr int16_t PROGRESS_BLANK = -1;
 constexpr char UNAVAILABLE_PRESET_NAME[] = "---";
@@ -69,6 +67,8 @@ static_assert(cellq::gui::PRESET_SELECT_BUTTON_LAST -
               "Preset selector button count must match preset slots");
 
 cellq::SquareWavePreset activePreset_ = {};
+cellq::SquareWavePreset factoryPresetCache_[2] = {};
+bool factoryPresetCached_[2] = {};
 ProcedureState state_ = ProcedureState::Idle;
 bool form2Visible_ = false;
 bool presetSelectVisible_ = false;
@@ -86,10 +86,8 @@ int16_t displayedProgress_ = PROGRESS_NOT_SENT;
 uint32_t lastRuntimeDisplayMs_ = 0;
 bool displaySyncPending_ = false;
 uint8_t displaySyncStep_ = 0;
-uint8_t displaySyncPass_ = 0;
 uint32_t displaySyncLastMs_ = 0;
 bool readySyncPending_ = false;
-uint8_t readyWriteCount_ = 0;
 uint32_t readyLastWriteMs_ = 0;
 char presetNames_[cellq::config::SQUARE_PRESET_SLOT_COUNT][21] = {};
 bool presetAvailable_[cellq::config::SQUARE_PRESET_SLOT_COUNT] = {};
@@ -202,13 +200,24 @@ void copyFactoryPreset(uint16_t id, cellq::SquareWavePreset &preset) {
 }
 
 bool findPresetForList(uint16_t id, cellq::SquareWavePreset &preset) {
+  if (id == 0U || id > cellq::config::SQUARE_PRESET_SLOT_COUNT) {
+    return false;
+  }
   if (id <= 2U) {
+    if (factoryPresetCached_[id - 1U]) {
+      preset = factoryPresetCache_[id - 1U];
+      return true;
+    }
 #if CELLQ_LOAD_FACTORY_PRESET_FROM_SD
     if (cellq::preset::findPreset(id, preset)) {
+      factoryPresetCache_[id - 1U] = preset;
+      factoryPresetCached_[id - 1U] = true;
       return true;
     }
 #endif
     copyFactoryPreset(id, preset);
+    factoryPresetCache_[id - 1U] = preset;
+    factoryPresetCached_[id - 1U] = true;
     return true;
   }
   return cellq::preset::findPreset(id, preset);
@@ -216,14 +225,7 @@ bool findPresetForList(uint16_t id, cellq::SquareWavePreset &preset) {
 
 bool loadSelectedPreset(uint16_t id, cellq::SquareWavePreset &preset) {
   if (id <= 2U) {
-#if CELLQ_LOAD_FACTORY_PRESET_FROM_SD
-    if (cellq::preset::loadPreset(id, preset)) {
-      return true;
-    }
-#endif
-    copyFactoryPreset(id, preset);
-    DBG_PRESET_FLASH(id);
-    return true;
+    return findPresetForList(id, preset);
   }
   return cellq::preset::loadPreset(id, preset);
 }
@@ -724,13 +726,7 @@ void updateDisplaySync(uint32_t now) {
     return;
   }
   displaySyncPending_ = false;
-  ++displaySyncPass_;
-  if (displaySyncPass_ < DISPLAY_SYNC_PASS_COUNT) {
-    startDisplaySync(now);
-    return;
-  }
   readySyncPending_ = true;
-  readyWriteCount_ = 0;
   readyLastWriteMs_ =
       now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
 }
@@ -752,10 +748,7 @@ void updateReadySync(uint32_t now) {
   }
   readyLastWriteMs_ = now;
   cellq::display::setSquarePresetReady(true);
-  ++readyWriteCount_;
-  if (readyWriteCount_ >= READY_WRITE_COUNT) {
-    finishPageSync(now);
-  }
+  finishPageSync(now);
 }
 
 void beginPageSync(uint32_t now) {
@@ -766,17 +759,23 @@ void beginPageSync(uint32_t now) {
   }
   displayedProgress_ = PROGRESS_NOT_SENT;
   lastRuntimeDisplayMs_ = now;
-  displaySyncPass_ = 0;
   startDisplaySync(now);
 }
 
 void loadPreset1(uint32_t now) {
+  const bool wasCached = factoryPresetCached_[0];
   bool loadedFromSd = false;
+  if (wasCached) {
+    activePreset_ = factoryPresetCache_[0];
+  } else {
 #if CELLQ_LOAD_FACTORY_PRESET_FROM_SD
-  loadedFromSd = cellq::preset::loadFactoryPreset1(activePreset_);
+    loadedFromSd = cellq::preset::loadFactoryPreset1(activePreset_);
 #endif
-  if (!loadedFromSd) {
-    copyFactoryPreset(1U, activePreset_);
+    if (!loadedFromSd) {
+      copyFactoryPreset(1U, activePreset_);
+    }
+    factoryPresetCache_[0] = activePreset_;
+    factoryPresetCached_[0] = true;
   }
   presetLoaded_ = true;
   state_ = ProcedureState::Idle;
@@ -784,6 +783,8 @@ void loadPreset1(uint32_t now) {
   beginPageSync(now);
   if (loadedFromSd) {
     DBG_SQUARE("LOAD,1,SD");
+  } else if (wasCached) {
+    DBG_PRESET_CACHE(1U);
   } else {
     DBG_PRESET_FLASH(1U);
   }
@@ -799,6 +800,7 @@ void openSquarePage(uint32_t now) {
   presetListScanPending_ = false;
   presetListWritePending_ = false;
   if (!presetLoaded_) {
+    cellq::display::setSquarePresetReady(false);
     loadPreset1(now);
   } else {
     if (procedureActive()) {

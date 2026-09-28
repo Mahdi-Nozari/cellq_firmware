@@ -6,10 +6,33 @@
 #include "HardwareConfig.h"
 
 namespace {
-Genie genie;
+constexpr uint8_t MAX_LABEL_LENGTH = 20U;
+constexpr uint8_t FRAME_LENGTH = 6U;
+constexpr uint8_t NO_EXPECTED_FORM = 0xFFU;
+
+struct TxCommand {
+  uint8_t command;
+  uint8_t object;
+  uint8_t index;
+  uint8_t retries;
+  uint16_t value;
+  char text[MAX_LABEL_LENGTH + 1U];
+};
+
 cellq::display::Event eventQueue[cellq::config::DISPLAY_EVENT_QUEUE_SIZE];
 uint8_t queueHead = 0;
 uint8_t queueTail = 0;
+TxCommand txQueue[cellq::config::DISPLAY_TX_QUEUE_SIZE] = {};
+TxCommand inFlight = {};
+uint8_t txCount = 0;
+uint8_t priorityTail = 0;
+uint8_t rxFrame[FRAME_LENGTH] = {};
+uint8_t rxFrameLength = 0;
+uint8_t expectedForm = NO_EXPECTED_FORM;
+uint32_t commandSentMs = 0;
+uint32_t lastFrameByteMs = 0;
+bool waitingForAck = false;
+bool eventPriority = false;
 
 static_assert(cellq::gui::PRESET_SELECT_NAME_LABEL_LAST -
                       cellq::gui::PRESET_SELECT_NAME_LABEL_FIRST +
@@ -45,16 +68,14 @@ void formatSignedTenths(char *text, int16_t tenths) {
   text[pos] = '\0';
 }
 
-void onGenieEvent() {
-  genieFrame frame;
-  if (!genie.DequeueEvent(&frame)) {
-    return;
-  }
-  const uint16_t value = genie.GetEventData(&frame);
-  DBG_EVENT(frame.reportObject.cmd, frame.reportObject.object,
-            frame.reportObject.index, value);
-  if (frame.reportObject.cmd != GENIE_REPORT_EVENT) {
-    return;
+void acceptEvent(uint8_t object, uint8_t index, uint16_t value) {
+  DBG_EVENT(GENIE_REPORT_EVENT, object, index, value);
+  if (object == cellq::gui::FORM_OBJECT) {
+    if (index != expectedForm) {
+      txCount = 0;
+      priorityTail = 0;
+    }
+    expectedForm = NO_EXPECTED_FORM;
   }
   const uint8_t next =
       (queueHead + 1U) % cellq::config::DISPLAY_EVENT_QUEUE_SIZE;
@@ -62,9 +83,187 @@ void onGenieEvent() {
     DBG_EVENT_DROP();
     return;
   }
-  eventQueue[queueHead] = {
-      frame.reportObject.object, frame.reportObject.index, value};
+  eventQueue[queueHead] = {object, index, value};
   queueHead = next;
+}
+
+void retryInFlight() {
+  if (inFlight.retries != 0U ||
+      txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE ||
+      (eventPriority && txCount != 0U) ||
+      (txCount != 0U && txQueue[0].object == cellq::gui::FORM_OBJECT)) {
+    DBG_LCD_DROP(inFlight.command, inFlight.index);
+    return;
+  }
+  DBG_LCD_RETRY(inFlight.command, inFlight.index);
+  ++inFlight.retries;
+  for (uint8_t index = txCount; index > 0U; --index) {
+    txQueue[index] = txQueue[index - 1U];
+  }
+  txQueue[0] = inFlight;
+  ++txCount;
+}
+
+void receiveByte(uint8_t byte) {
+  const uint32_t now = millis();
+  if (rxFrameLength != 0U &&
+      static_cast<uint32_t>(now - lastFrameByteMs) > 50U) {
+    rxFrameLength = 0;
+  }
+  if (rxFrameLength != 0U) {
+    lastFrameByteMs = now;
+    rxFrame[rxFrameLength++] = byte;
+    if (rxFrameLength == FRAME_LENGTH) {
+      uint8_t checksum = 0;
+      for (uint8_t index = 0; index < FRAME_LENGTH; ++index) {
+        checksum ^= rxFrame[index];
+      }
+      if (checksum == 0U) {
+        acceptEvent(rxFrame[1], rxFrame[2],
+                    static_cast<uint16_t>(rxFrame[3]) << 8U |
+                        rxFrame[4]);
+      }
+      rxFrameLength = 0;
+    }
+    return;
+  }
+  if (byte == GENIE_REPORT_EVENT) {
+    rxFrame[0] = byte;
+    rxFrameLength = 1;
+    lastFrameByteMs = now;
+  } else if (byte == GENIE_ACK) {
+    waitingForAck = false;
+  } else if (byte == GENIE_NAK) {
+    if (waitingForAck) {
+      waitingForAck = false;
+      retryInFlight();
+    }
+  }
+}
+
+uint8_t packetLength(const TxCommand &item) {
+  if (item.command == GENIE_WRITE_OBJ) {
+    return FRAME_LENGTH;
+  }
+  return static_cast<uint8_t>(4U + strlen(item.text));
+}
+
+void sendPacket(const TxCommand &item) {
+  uint8_t checksum = item.command;
+  Serial1.write(item.command);
+  if (item.command == GENIE_WRITE_OBJ) {
+    const uint8_t bytes[] = {
+        item.object, item.index, static_cast<uint8_t>(item.value >> 8U),
+        static_cast<uint8_t>(item.value)};
+    for (uint8_t byte : bytes) {
+      Serial1.write(byte);
+      checksum ^= byte;
+    }
+  } else {
+    const uint8_t length = strlen(item.text);
+    Serial1.write(item.index);
+    Serial1.write(length);
+    checksum ^= item.index ^ length;
+    for (uint8_t index = 0; index < length; ++index) {
+      const uint8_t byte = item.text[index];
+      Serial1.write(byte);
+      checksum ^= byte;
+    }
+  }
+  Serial1.write(checksum);
+  commandSentMs = millis();
+  waitingForAck = true;
+}
+
+void sendNext() {
+  if (waitingForAck || txCount == 0U ||
+      Serial1.availableForWrite() < packetLength(txQueue[0])) {
+    return;
+  }
+  inFlight = txQueue[0];
+  for (uint8_t index = 1; index < txCount; ++index) {
+    txQueue[index - 1U] = txQueue[index];
+  }
+  --txCount;
+  if (priorityTail != 0U) {
+    --priorityTail;
+  }
+  sendPacket(inFlight);
+}
+
+void queueCommand(const TxCommand &item) {
+  const bool pageStatusImage =
+      item.object == cellq::gui::USERIMAGES_OBJECT &&
+      (item.index == cellq::gui::SQUARE_PRESET_READY_IMAGE ||
+       item.index == cellq::gui::MONITOR_PAGE_STATUS_IMAGE);
+  if (item.object != cellq::gui::SCOPE_OBJECT && !pageStatusImage) {
+    for (uint8_t index = 0; index < txCount; ++index) {
+      if (txQueue[index].command == item.command &&
+          txQueue[index].object == item.object &&
+          txQueue[index].index == item.index) {
+        if (!eventPriority) {
+          txQueue[index] = item;
+          return;
+        }
+        for (uint8_t next = index + 1U; next < txCount; ++next) {
+          txQueue[next - 1U] = txQueue[next];
+        }
+        --txCount;
+        if (index < priorityTail) {
+          --priorityTail;
+        }
+        break;
+      }
+    }
+  }
+  if (txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE) {
+    if (!eventPriority) {
+      DBG_LCD_DROP(item.command, item.index);
+      return;
+    }
+    DBG_LCD_DROP(txQueue[txCount - 1U].command,
+                 txQueue[txCount - 1U].index);
+    --txCount;
+    if (priorityTail > txCount) {
+      priorityTail = txCount;
+    }
+  }
+  if (eventPriority) {
+    for (uint8_t index = txCount; index > priorityTail; --index) {
+      txQueue[index] = txQueue[index - 1U];
+    }
+    txQueue[priorityTail++] = item;
+    ++txCount;
+  } else {
+    txQueue[txCount++] = item;
+  }
+  sendNext();
+}
+
+void queueObject(uint8_t object, uint8_t index, uint16_t value) {
+  TxCommand item = {};
+  item.command = GENIE_WRITE_OBJ;
+  item.object = object;
+  item.index = index;
+  item.value = value;
+  queueCommand(item);
+}
+
+void queueLabel(uint8_t index, const char *text) {
+  if (text == nullptr) {
+    return;
+  }
+  const size_t length = strlen(text);
+  if (length > MAX_LABEL_LENGTH) {
+    DBG_LCD_DROP(GENIE_WRITE_INH_LABEL, index);
+    return;
+  }
+  TxCommand item = {};
+  item.command = GENIE_WRITE_INH_LABEL;
+  item.object = cellq::gui::ILABELB_OBJECT;
+  item.index = index;
+  memcpy(item.text, text, length + 1U);
+  queueCommand(item);
 }
 }
 
@@ -73,9 +272,12 @@ namespace display {
 void begin() {
   queueHead = 0;
   queueTail = 0;
+  txCount = 0;
+  priorityTail = 0;
+  rxFrameLength = 0;
+  expectedForm = NO_EXPECTED_FORM;
+  waitingForAck = false;
   Serial1.begin(config::DISPLAY_BAUD);
-  genie.Begin(Serial1);
-  genie.AttachEventHandler(onGenieEvent);
   pinMode(hw::DISPLAY_RESET_PIN, OUTPUT);
   digitalWrite(hw::DISPLAY_RESET_PIN, HIGH);
   delay(100);
@@ -87,7 +289,33 @@ void begin() {
 }
 
 void service() {
-  genie.DoEvents();
+  uint8_t processed = 0;
+  while (Serial1.available() > 0 && processed < 64U) {
+    const uint8_t nextEventSlot =
+        (queueHead + 1U) % config::DISPLAY_EVENT_QUEUE_SIZE;
+    if (nextEventSlot == queueTail && rxFrameLength == 0U) {
+      break;
+    }
+    receiveByte(static_cast<uint8_t>(Serial1.read()));
+    ++processed;
+  }
+  if (waitingForAck &&
+      static_cast<uint32_t>(millis() - commandSentMs) >=
+          config::DISPLAY_ACK_TIMEOUT_MS) {
+    waitingForAck = false;
+    retryInFlight();
+  }
+  sendNext();
+}
+
+void beginEventUpdate() {
+  eventPriority = true;
+  priorityTail = 0;
+}
+
+void endEventUpdate() {
+  eventPriority = false;
+  priorityTail = 0;
 }
 
 bool nextEvent(Event &event) {
@@ -103,8 +331,8 @@ void setManualSwitch(uint8_t channel, bool on) {
   if (channel >= hw::CHANNEL_COUNT) {
     return;
   }
-  genie.WriteObject(gui::ISWITCH_OBJECT,
-                    gui::MANUAL_VALVE_SWITCH_FIRST + channel, on ? 1 : 0);
+  queueObject(gui::ISWITCH_OBJECT,
+              gui::MANUAL_VALVE_SWITCH_FIRST + channel, on ? 1 : 0);
 }
 
 void setManualPressureLabel(uint8_t regulator, int16_t tenths) {
@@ -113,7 +341,7 @@ void setManualPressureLabel(uint8_t regulator, int16_t tenths) {
   }
   char text[8];
   formatSignedTenths(text, tenths);
-  genie.WriteInhLabel(gui::MANUAL_PRESSURE_LABEL[regulator], text);
+  queueLabel(gui::MANUAL_PRESSURE_LABEL[regulator], text);
 }
 
 void setManualTimeLabel(uint8_t channel, uint16_t seconds) {
@@ -123,23 +351,23 @@ void setManualTimeLabel(uint8_t channel, uint16_t seconds) {
   char text[6];
   uint8_t pos = appendUnsigned(text, seconds);
   text[pos] = '\0';
-  genie.WriteInhLabel(gui::MANUAL_TIME_LABEL_FIRST + channel, text);
+  queueLabel(gui::MANUAL_TIME_LABEL_FIRST + channel, text);
 }
 
 void setMonitorChannelStatus(uint8_t channel, uint8_t image) {
   if (channel >= hw::CHANNEL_COUNT || image > 2U) {
     return;
   }
-  genie.WriteObject(gui::USERIMAGES_OBJECT,
-                    gui::MONITOR_CHANNEL_IMAGE_FIRST + channel, image);
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::MONITOR_CHANNEL_IMAGE_FIRST + channel, image);
 }
 
 void setMonitorPageStatus(uint8_t image) {
   if (image > 2U) {
     return;
   }
-  genie.WriteObject(gui::USERIMAGES_OBJECT,
-                    gui::MONITOR_PAGE_STATUS_IMAGE, image);
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::MONITOR_PAGE_STATUS_IMAGE, image);
 }
 
 void setMonitorPressureLabel(uint8_t channel, int16_t tenths) {
@@ -148,7 +376,7 @@ void setMonitorPressureLabel(uint8_t channel, int16_t tenths) {
   }
   char text[8];
   formatSignedTenths(text, tenths);
-  genie.WriteInhLabel(gui::MONITOR_PRESSURE_LABEL_FIRST + channel, text);
+  queueLabel(gui::MONITOR_PRESSURE_LABEL_FIRST + channel, text);
 }
 
 void addMonitorScopeSample(uint8_t channel, uint16_t value) {
@@ -157,7 +385,7 @@ void addMonitorScopeSample(uint8_t channel, uint16_t value) {
     return;
   }
   const uint8_t group = channel / gui::MONITOR_SCOPE_TRACES;
-  genie.WriteObject(gui::SCOPE_OBJECT, gui::MONITOR_GROUP_SCOPE[group], value);
+  queueObject(gui::SCOPE_OBJECT, gui::MONITOR_GROUP_SCOPE[group], value);
 }
 
 void setSquareLabel(uint8_t index, const char *text) {
@@ -168,56 +396,56 @@ void setSquareLabel(uint8_t index, const char *text) {
   if (text == nullptr || (!runLabel && !totalLabel)) {
     return;
   }
-  genie.WriteInhLabel(index, text);
+  queueLabel(index, text);
 }
 
 void setSquareChannelEnabled(uint8_t channel, bool enabled) {
   if (channel >= hw::CHANNEL_COUNT) {
     return;
   }
-  genie.WriteObject(gui::USERIMAGES_OBJECT,
-                    gui::SQUARE_CHANNEL_IMAGE_FIRST + channel,
-                    enabled ? 1 : 0);
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::SQUARE_CHANNEL_IMAGE_FIRST + channel,
+              enabled ? 1 : 0);
 }
 
 void setSquareStatus(uint8_t image) {
   if (image > 4U) {
     return;
   }
-  genie.WriteObject(gui::USERIMAGES_OBJECT, gui::SQUARE_STATUS_IMAGE, image);
+  queueObject(gui::USERIMAGES_OBJECT, gui::SQUARE_STATUS_IMAGE, image);
 }
 
 void setSquarePresetReady(bool ready) {
-  genie.WriteObject(gui::USERIMAGES_OBJECT,
-                    gui::SQUARE_PRESET_READY_IMAGE, ready ? 1 : 0);
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::SQUARE_PRESET_READY_IMAGE, ready ? 1 : 0);
 }
 
 void setSquareStartButton(bool stopImage) {
-  genie.WriteObject(gui::USERBUTTON_OBJECT, gui::SQUARE_START_BUTTON,
-                    stopImage ? 1 : 0);
+  queueObject(gui::USERBUTTON_OBJECT, gui::SQUARE_START_BUTTON,
+              stopImage ? 1 : 0);
 }
 
 void setSquarePauseButton(bool continueImage) {
-  genie.WriteObject(gui::USERBUTTON_OBJECT, gui::SQUARE_PAUSE_BUTTON,
-                    continueImage ? 1 : 0);
+  queueObject(gui::USERBUTTON_OBJECT, gui::SQUARE_PAUSE_BUTTON,
+              continueImage ? 1 : 0);
 }
 
 void setSquarePauseAtCycleSwitch(bool enabled) {
-  genie.WriteObject(gui::ISWITCH_OBJECT,
-                    gui::SQUARE_PAUSE_AT_CYCLE_SWITCH,
-                    enabled ? 1 : 0);
+  queueObject(gui::ISWITCH_OBJECT,
+              gui::SQUARE_PAUSE_AT_CYCLE_SWITCH,
+              enabled ? 1 : 0);
 }
 
 void setSquareDataLogSwitch(bool enabled) {
-  genie.WriteObject(gui::ISWITCH_OBJECT, gui::SQUARE_DATA_LOG_SWITCH,
-                    enabled ? 1 : 0);
+  queueObject(gui::ISWITCH_OBJECT, gui::SQUARE_DATA_LOG_SWITCH,
+              enabled ? 1 : 0);
 }
 
 void setPresetSelectName(uint8_t slot, const char *text) {
   if (slot >= config::SQUARE_PRESET_SLOT_COUNT || text == nullptr) {
     return;
   }
-  genie.WriteInhLabel(gui::PRESET_SELECT_NAME_LABEL_FIRST + slot, text);
+  queueLabel(gui::PRESET_SELECT_NAME_LABEL_FIRST + slot, text);
 }
 
 void setSquareSetupLabel(uint8_t index, const char *text) {
@@ -232,46 +460,49 @@ void setSquareSetupLabel(uint8_t index, const char *text) {
     }
   }
   if (valid) {
-    genie.WriteInhLabel(index, text);
+    queueLabel(index, text);
   }
 }
 
 void setSquareSetupCycleModeSwitch(bool cycleMode) {
-  genie.WriteObject(gui::ISWITCH_OBJECT,
-                    gui::SETUP_CYCLE_MODE_SWITCH, cycleMode ? 1U : 0U);
+  queueObject(gui::ISWITCH_OBJECT,
+              gui::SETUP_CYCLE_MODE_SWITCH, cycleMode ? 1U : 0U);
 }
 
 void setSquareSetupModeImage(uint8_t group, bool timeMode) {
   if (group >= hw::REGULATOR_COUNT) {
     return;
   }
-  genie.WriteObject(gui::USERIMAGES_OBJECT,
-                    gui::SETUP_MODE_IMAGE[group], timeMode ? 1U : 0U);
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::SETUP_MODE_IMAGE[group], timeMode ? 1U : 0U);
 }
 
 void setSquareSetupChannel(uint8_t channel, bool enabled) {
   if (channel >= hw::CHANNEL_COUNT) {
     return;
   }
-  genie.WriteObject(gui::USERBUTTON_OBJECT,
-                    gui::SETUP_CHANNEL_BUTTON_FIRST + channel,
-                    enabled ? 0U : 1U);
+  queueObject(gui::USERBUTTON_OBJECT,
+              gui::SETUP_CHANNEL_BUTTON_FIRST + channel,
+              enabled ? 0U : 1U);
 }
 
 void setSquareSetupSaveButton(bool savedImage) {
-  genie.WriteObject(gui::USERBUTTON_OBJECT, gui::SETUP_SAVE_BUTTON,
-                    savedImage ? 1U : 0U);
+  queueObject(gui::USERBUTTON_OBJECT, gui::SETUP_SAVE_BUTTON,
+              savedImage ? 1U : 0U);
 }
 
 void setPresetNameEntry(const char *text) {
   if (text == nullptr) {
     return;
   }
-  genie.WriteInhLabel(gui::PRESET_NAME_LABEL, text);
+  queueLabel(gui::PRESET_NAME_LABEL, text);
 }
 
 void activateForm(uint8_t form) {
-  genie.WriteObject(gui::FORM_OBJECT, form, 0);
+  txCount = 0;
+  priorityTail = 0;
+  expectedForm = form;
+  queueObject(gui::FORM_OBJECT, form, 0);
 }
 }
 }

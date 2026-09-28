@@ -306,6 +306,7 @@ void enterSetup(uint32_t now, bool activateForm) {
   currentForm_ = cellq::gui::SQUARE_SETUP_FORM;
   if (activateForm) {
     cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
+    cellq::display::service();
   }
   if (!loadDraft(1U, now)) {
     draftValid_ = false;
