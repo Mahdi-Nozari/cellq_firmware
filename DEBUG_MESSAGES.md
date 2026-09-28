@@ -57,14 +57,16 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,RTC,FAIL` | The PCF8523 did not respond; saves use the zero timestamp. |
 | `D,SET,LOAD,1` | Form 4 loaded factory preset 1 into the setup draft. |
 | `D,SET,SELECT` | A validated Form 7 preset was loaded into the Form 4 draft. |
+| `D,SET,SELECT,BACK` | Form 7 Back restored the unsaved Form 4 draft without selecting a preset. |
 | `D,SET,NAME,OPEN` | Form 6 opened with the current draft name in ILabelB64. |
 | `D,SET,NAME,SET` | The valid temporary name was applied to the RAM draft. |
 | `D,SET,NAME,CANCEL` | Form 6 Back returned to Form 4 without changing the draft name. |
 | `D,SET,NAME,INVALID` | Set was ignored because the name was empty or had a leading/trailing space. |
 | `D,SET,NAME,READONLY` | Userbutton52 was ignored because a factory preset was displayed. |
-| `D,SET,READY` | The staged Form 4 labels and channel buttons finished synchronizing. |
+| `D,SET,READY` | The staged Form 4 labels, including total cycles in B67/B68, and channel buttons finished synchronizing. |
+| `D,SET,MODE,CYCLES` / `MODE,TIME` | ISwitch8 selected cycle or HH:MM time entry for B67/B68. Time mode starts at `00:00` and converts entered time to cycles, rounding down. |
 | `D,SET,NEW` / `NEW,FULL` | A new lowest-vacant-ID draft was created, or all user IDs are occupied. |
-| `D,SET,SAVE,OK` / `SAVE,FAIL` | Form 4 save completed or failed. |
+| `D,SET,SAVE,OK` / `SAVE,FAIL` | Form 4 save completed or failed. On success, Userbutton55 shows image 1 for 3 seconds, then returns to image 0; Save presses during that interval are ignored. |
 | `D,SET,DELETE,OK` / `DELETE,FAIL` | Form 4 deletion completed or failed. |
 | `D,SET,LOCKED` | Setup navigation was rejected because a test is active. |
 | `D,SET,EDIT,READONLY` | An edit was attempted while a factory preset was displayed. |
@@ -82,7 +84,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,LIST,READY` | All 18 cached Form 7 preset names were sent to ILabelB46-ILabelB63. |
 | `D,SW,SELECT,LOCKED` | Preset selection was requested during an active procedure, or Form 7 was reached through another route. The active procedure was preserved and Form 7 was not allowed to remain open. |
 | `D,SW,SELECT,SETUP` | A Form 7 selection was routed back to Form 4 rather than committed as the active run preset. |
-| `D,SW,READY` | The required Form 2 synchronization completed and UserImages13 changed to image 1. The first load includes static fields plus Scope0 and Scope7; later active-state returns include only runtime fields. |
+| `D,SW,SELECT,BACK` | Form 7 Back returned to its opening page without changing the selected preset. |
+| `D,SW,READY` | Both Form 2 field-refresh passes completed, and UserImages13 was commanded to image 1. |
 | `D,SW,START` | The Square-wave procedure started. |
 | `D,SW,PAUSE,WAIT` | ISwitch7 was ON, so a cycle-boundary pause was requested. Each unfinished group is still completing its current cycle and UserImages12 remains at running image 1. |
 | `D,SW,PAUSE` | The Square-wave procedure is fully paused and UserImages12 uses image 4. With immediate pause, valve phases are preserved; with cycle-boundary pause, both groups are OFF at their boundaries. Regulators remain active. |
@@ -188,7 +191,8 @@ Form 0 also reports activation. Moving from Manual Form 1 to Form 0 hides the Ma
 | Form | 3 | Activate channel-pressure monitoring |
 | ILabelB | 8-13 | Pressure values for channels 1-6; firmware output only |
 | UserImages | 0-5 | Not-running, active, or suppressed channel state; firmware output only |
-| Scope | 1-6 | Real-time pressure traces for channels 1-6; firmware output only |
+| Scope | 1-2 | Scope1 traces 1-3 show channels 1-3; Scope2 traces 1-3 show channels 4-6; firmware output only |
+| UserImages | 14 | Form 3 loading image 0, ready image 1, running/paused image 2; firmware output only |
 | Userbutton | 26 | Request setup Form 4 while the procedure is stopped |
 
 Any reported activation of another form disables monitor sampling and writes.
@@ -200,10 +204,15 @@ Any reported activation of another form disables monitor sampling and writes.
 | Form | 4 | Load factory preset 1 into the setup draft |
 | Userbutton | 36-39 / 44-47 | Group 1 pressure, frequency, duty, and delay decrease/increase |
 | Userbutton | 43,42,41,40 / 48-51 | Group 2 pressure, frequency, duty, and delay decrease/increase |
+| ILabelB | 67 / 68 | Group 1 / group 2 configured total cycles; firmware output only |
+| Userbutton | 29 / 106 | Group 1 total cycles decrease/increase by 10 |
+| Userbutton | 107 / 108 | Group 2 total cycles decrease/increase by 10 |
+| ISwitch | 8 | ON: cycle entry; OFF: HH:MM time entry in 5-minute steps |
+| UserImages | 15 / 16 | Group 1 / group 2 entry-mode image: 0 cycles, 1 time |
 | Userbutton | 52 | Open Form 6 to edit an existing user-preset draft name |
-| Userbutton | 53 | Open the shared Form 7 selector and discard the current unsaved draft |
+| Userbutton | 53 | Open the shared Form 7 selector; Back restores the current unsaved draft |
 | Userbutton | 54 | Create a new draft using the lowest vacant ID |
-| Userbutton | 55 | Save the current user-preset draft |
+| Userbutton | 55 | Save the current user-preset draft; image 1 confirms success for 3 seconds |
 | Userbutton | 56 | Delete the current user preset |
 | Userbutton | 57-62 | Toggle channels 1-6 between enabled image 0 and suppressed image 1 |
 
@@ -397,7 +406,7 @@ D,SW,LOAD,1,SD
 D,SW,READY
 ```
 
-This is the successful SD sequence for revision 1. UserImages13 is first set to image 0. Preset labels and images are then written once in staged updates, followed by 32 samples for group 1 on Scope0 and 32 samples for group 2 on Scope7. Both scopes should use Xmag 10 and RefreshIncrement 32 in Workshop. `D,SW,READY` appears and UserImages13 changes to image 1 only after both previews finish. This indicates that the page data is ready; it does not verify physical hardware.
+This is the successful SD sequence for revision 1. UserImages13 is first set to image 0. Preset labels and images are written in two staged passes, including total cycles in B65 and B66. `D,SW,READY` appears after the ready image has been commanded twice. This indicates that the page data was sent; it does not verify physical hardware or every display acknowledgement.
 
 If the SD file is unavailable or invalid, `D,PR,ERR,1,<code>` and `D,SW,LOAD,1,FLASH` appear instead. The page still loads the compiled preset and becomes ready.
 
@@ -455,6 +464,8 @@ D,SW,READY
 
 Selecting either factory preset may instead produce `D,SW,LOAD,<id>,FLASH` when its compiled fallback is used. An unavailable `---` position is ignored.
 
+Userbutton87 cancels selection and returns to the page that opened Form 7. From Form 2, it keeps the active run preset and reports `D,SW,SELECT,BACK`. From Form 4, it restores the unsaved setup draft and also reports `D,SET,SELECT,BACK`. The 18 Set buttons are the only controls that select a preset.
+
 If Userbutton30 is pressed while a procedure is running, waiting for a boundary pause, or paused, firmware remains on Form 2 and reports:
 
 ```text
@@ -473,7 +484,7 @@ Returning to Form 2 reuses the preset cached in RAM and produces:
 D,SW,CACHE,1
 ```
 
-It does not reopen the SD file, resend the static preset fields, or redraw Scope0 or Scope7. An idle return only reaffirms UserImages13 image 1. A running, paused, done, or error return briefly synchronizes the nine changing runtime fields, followed by:
+It does not reopen the SD file. It refreshes all Form 2 fields and control images from RAM in two paced passes, followed by:
 
 ```text
 D,SW,READY

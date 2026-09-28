@@ -9,6 +9,9 @@ namespace {
 constexpr uint8_t STATUS_NOT_RUNNING_IMAGE = 0;
 constexpr uint8_t STATUS_ACTIVE_IMAGE = 1;
 constexpr uint8_t STATUS_SUPPRESSED_IMAGE = 2;
+constexpr uint8_t PAGE_LOADING_IMAGE = 0;
+constexpr uint8_t PAGE_READY_IMAGE = 1;
+constexpr uint8_t PAGE_RUNNING_IMAGE = 2;
 constexpr uint16_t SCOPE_CHANNEL_INTERVAL_MS =
     cellq::config::MONITOR_SCOPE_UPDATE_INTERVAL_MS /
     cellq::hw::CHANNEL_COUNT;
@@ -20,13 +23,20 @@ static_assert(SCOPE_CHANNEL_INTERVAL_MS > 0,
               "Monitor scope interval is too short");
 static_assert(LABEL_CHANNEL_INTERVAL_MS > 0,
               "Monitor label interval is too short");
+static_assert(cellq::gui::MONITOR_SCOPE_TRACES *
+                      cellq::hw::REGULATOR_COUNT ==
+                  cellq::hw::CHANNEL_COUNT,
+              "Monitor scope mapping must cover all channels");
 
 int16_t pressureTenths_[cellq::hw::CHANNEL_COUNT] = {};
 bool pressureValid_[cellq::hw::CHANNEL_COUNT] = {};
 bool formVisible_ = false;
 bool streamActive_ = false;
 uint8_t displayedTestState_ = UINT8_MAX;
+uint8_t displayedPageStatus_ = UINT8_MAX;
+bool loadingStatusPending_ = false;
 uint8_t statusSyncChannel_ = cellq::hw::CHANNEL_COUNT;
+// Preserve the next trace across stream stops; each scope advances per write.
 uint8_t scopeChannel_ = 0;
 uint8_t labelChannel_ = 0;
 uint32_t lastDisplayWriteMs_ = 0;
@@ -103,19 +113,24 @@ int16_t readPressureTenths(uint8_t channel) {
 #endif
 }
 
-uint16_t pressureToScopeValue(int16_t pressureTenths) {
-  if (pressureTenths < cellq::config::SQUARE_PRESSURE_MIN_TENTHS) {
-    pressureTenths = cellq::config::SQUARE_PRESSURE_MIN_TENTHS;
+uint16_t pressureToScopeValue(uint8_t channel, int16_t pressureTenths) {
+  if (pressureTenths >= 0) {
+    return 0;
   }
-  if (pressureTenths > cellq::config::SQUARE_PRESSURE_MAX_TENTHS) {
-    pressureTenths = cellq::config::SQUARE_PRESSURE_MAX_TENTHS;
-  }
-  const int16_t range = cellq::config::SQUARE_PRESSURE_MAX_TENTHS -
-                        cellq::config::SQUARE_PRESSURE_MIN_TENTHS;
+  const int16_t targetTenths =
+      cellq::square::channelPressureTenths(channel);
+  const uint16_t scaleTenths = targetTenths < 0
+      ? static_cast<uint16_t>(-static_cast<int32_t>(targetTenths))
+      : static_cast<uint16_t>(-cellq::config::SQUARE_PRESSURE_MIN_TENTHS);
+  const uint32_t magnitude =
+      static_cast<uint32_t>(-static_cast<int32_t>(pressureTenths));
+  const uint32_t scaled =
+      (magnitude * cellq::config::MONITOR_SCOPE_VALUE_MAX +
+       scaleTenths / 2U) / scaleTenths;
   return static_cast<uint16_t>(
-      static_cast<int32_t>(cellq::config::SQUARE_PRESSURE_MAX_TENTHS -
-                           pressureTenths) *
-      100L / range);
+      scaled > cellq::config::MONITOR_SCOPE_VALUE_MAX
+          ? cellq::config::MONITOR_SCOPE_VALUE_MAX
+          : scaled);
 }
 
 void sampleChannel(uint8_t channel) {
@@ -132,7 +147,6 @@ void stopStream() {
 
 void startStream(uint32_t now) {
   streamActive_ = true;
-  scopeChannel_ = 0;
   labelChannel_ = 0;
   lastScopeWriteMs_ = now - SCOPE_CHANNEL_INTERVAL_MS;
   lastLabelWriteMs_ = now - LABEL_CHANNEL_INTERVAL_MS;
@@ -155,6 +169,8 @@ void activate(uint32_t now) {
   formVisible_ = true;
   streamActive_ = false;
   displayedTestState_ = UINT8_MAX;
+  displayedPageStatus_ = UINT8_MAX;
+  loadingStatusPending_ = true;
   statusSyncChannel_ = 0;
   lastDisplayWriteMs_ =
       now - cellq::config::MONITOR_DISPLAY_WRITE_INTERVAL_MS;
@@ -186,7 +202,8 @@ void writeNextStatus() {
 void writeNextScope(uint32_t now) {
   sampleChannel(scopeChannel_);
   cellq::display::addMonitorScopeSample(
-      scopeChannel_, pressureToScopeValue(pressureTenths_[scopeChannel_]));
+      scopeChannel_,
+      pressureToScopeValue(scopeChannel_, pressureTenths_[scopeChannel_]));
   scopeChannel_ = (scopeChannel_ + 1U) % cellq::hw::CHANNEL_COUNT;
   lastScopeWriteMs_ = now;
 }
@@ -210,7 +227,10 @@ void begin() {
   formVisible_ = false;
   streamActive_ = false;
   displayedTestState_ = UINT8_MAX;
+  displayedPageStatus_ = UINT8_MAX;
+  loadingStatusPending_ = false;
   statusSyncChannel_ = hw::CHANNEL_COUNT;
+  scopeChannel_ = 0;
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
   calibratePressureZeros();
 #endif
@@ -232,8 +252,18 @@ void update(uint32_t now) {
       config::MONITOR_DISPLAY_WRITE_INTERVAL_MS) {
     return;
   }
-  if (statusSyncChannel_ < hw::CHANNEL_COUNT) {
+  const uint8_t pageStatus = square::isProcedureActive()
+                                 ? PAGE_RUNNING_IMAGE
+                                 : PAGE_READY_IMAGE;
+  if (loadingStatusPending_) {
+    display::setMonitorPageStatus(PAGE_LOADING_IMAGE);
+    displayedPageStatus_ = PAGE_LOADING_IMAGE;
+    loadingStatusPending_ = false;
+  } else if (statusSyncChannel_ < hw::CHANNEL_COUNT) {
     writeNextStatus();
+  } else if (pageStatus != displayedPageStatus_) {
+    display::setMonitorPageStatus(pageStatus);
+    displayedPageStatus_ = pageStatus;
   } else if (!streamActive_) {
     return;
   } else if (static_cast<uint32_t>(now - lastScopeWriteMs_) >=

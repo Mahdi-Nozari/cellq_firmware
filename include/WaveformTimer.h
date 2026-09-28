@@ -17,6 +17,9 @@ struct Config {
 
 void begin();
 bool start(const Config &config);
+uint32_t cyclesForDurationMinutes(uint32_t minutes,
+                                  uint16_t frequencyTenthsHz,
+                                  uint16_t delayMs);
 void stop();
 void pause();
 void pauseAtCycleBoundary();

@@ -18,6 +18,11 @@ static_assert(F_CPU % TIMER_PRESCALER == 0,
 static_assert(TIMER_TICKS_PER_SECOND % 1000UL == 0,
               "Timer5 must convert milliseconds to whole ticks");
 
+uint32_t periodTicksForFrequency(uint16_t frequencyTenthsHz) {
+  return (TIMER_TICKS_PER_SECOND * 10UL +
+          frequencyTenthsHz / 2U) / frequencyTenthsHz;
+}
+
 volatile uint8_t *valvePorts_[cellq::hw::CHANNEL_COUNT] = {};
 uint8_t valveMasks_[cellq::hw::CHANNEL_COUNT] = {};
 #if CELLQ_MIRROR_CHANNEL_1_TO_LED
@@ -37,6 +42,7 @@ volatile uint8_t dutyPercent_[GROUP_COUNT] = {};
 volatile uint32_t totalCycles_[GROUP_COUNT] = {};
 volatile uint32_t completedCycles_[GROUP_COUNT] = {};
 volatile uint32_t periodTicks_[GROUP_COUNT] = {};
+volatile uint32_t delayTicks_[GROUP_COUNT] = {};
 volatile uint32_t onTicks_[GROUP_COUNT] = {};
 volatile uint32_t offTicks_[GROUP_COUNT] = {};
 volatile uint32_t ticksToEvent_[GROUP_COUNT] = {};
@@ -141,6 +147,17 @@ void beginCycleUnsafe(uint8_t group) {
       dutyPercent_[group] == 100U ? periodTicks_[group] : onTicks_[group];
 }
 
+void beginDelayUnsafe(uint8_t group) {
+  waitingAtBoundary_[group] = false;
+  writeGroupOutputsUnsafe(group, false);
+  if (delayTicks_[group] == 0U) {
+    beginCycleUnsafe(group);
+    return;
+  }
+  phase_[group] = Phase::Delay;
+  ticksToEvent_[group] = delayTicks_[group];
+}
+
 void completeCycleUnsafe(uint8_t group) {
   if (completedCycles_[group] < UINT32_MAX) {
     ++completedCycles_[group];
@@ -156,7 +173,7 @@ void completeCycleUnsafe(uint8_t group) {
     ticksToEvent_[group] = 0;
     return;
   }
-  beginCycleUnsafe(group);
+  beginDelayUnsafe(group);
 }
 
 void processGroupEventUnsafe(uint8_t group) {
@@ -271,6 +288,24 @@ ISR(TIMER5_COMPA_vect) {
 
 namespace cellq {
 namespace waveform {
+uint32_t cyclesForDurationMinutes(uint32_t minutes,
+                                  uint16_t frequencyTenthsHz,
+                                  uint16_t delayMs) {
+  if (minutes == 0U || frequencyTenthsHz == 0U) {
+    return 0U;
+  }
+  const uint32_t cycleTicks =
+      periodTicksForFrequency(frequencyTenthsHz) +
+      static_cast<uint32_t>(delayMs) *
+          (TIMER_TICKS_PER_SECOND / 1000UL);
+  const uint64_t requestedTicks =
+      static_cast<uint64_t>(minutes) * 60ULL *
+      TIMER_TICKS_PER_SECOND;
+  const uint64_t cycles = requestedTicks / cycleTicks;
+  return cycles > UINT32_MAX ? UINT32_MAX
+                             : static_cast<uint32_t>(cycles);
+}
+
 void begin() {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
     TCCR5A = 0;
@@ -342,9 +377,7 @@ bool start(const Config &waveformConfig) {
         continue;
       }
       periodTicks_[group] =
-          (TIMER_TICKS_PER_SECOND * 10UL +
-           config.frequencyTenthsHz / 2U) /
-          config.frequencyTenthsHz;
+          periodTicksForFrequency(config.frequencyTenthsHz);
       onTicks_[group] = static_cast<uint32_t>(
           (static_cast<uint64_t>(periodTicks_[group]) *
                config.dutyPercent +
@@ -358,15 +391,10 @@ bool start(const Config &waveformConfig) {
         onTicks_[group] = periodTicks_[group] - 1UL;
       }
       offTicks_[group] = periodTicks_[group] - onTicks_[group];
-      const uint32_t delayTicks =
+      delayTicks_[group] =
           static_cast<uint32_t>(config.delayMs) *
           (TIMER_TICKS_PER_SECOND / 1000UL);
-      if (delayTicks == 0U) {
-        beginCycleUnsafe(group);
-      } else {
-        phase_[group] = Phase::Delay;
-        ticksToEvent_[group] = delayTicks;
-      }
+      beginDelayUnsafe(group);
     }
     scheduleNextUnsafe();
   }
@@ -410,7 +438,8 @@ void pauseAtCycleBoundary() {
     captureTimerProgressUnsafe();
     boundaryPauseRequested_ = true;
     for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
-      if (continuousOff_[group]) {
+      if (continuousOff_[group] ||
+          (!groupFinished_[group] && phase_[group] == Phase::Delay)) {
         writeGroupOutputsUnsafe(group, false);
         waitingAtBoundary_[group] = true;
         ticksToEvent_[group] = 0;
@@ -439,7 +468,7 @@ void resume() {
       boundaryPaused_ = false;
       for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
         if (!groupFinished_[group] && !continuousOff_[group]) {
-          beginCycleUnsafe(group);
+          beginDelayUnsafe(group);
         }
       }
     }
@@ -465,6 +494,7 @@ uint64_t remainingMilliseconds(uint8_t group) {
   uint32_t totalCycles;
   uint32_t completedCycles;
   uint32_t periodTicks;
+  uint32_t delayTicks;
   uint32_t offTicks;
   uint32_t ticksToEvent;
   uint8_t dutyPercent;
@@ -476,6 +506,7 @@ uint64_t remainingMilliseconds(uint8_t group) {
     totalCycles = totalCycles_[group];
     completedCycles = completedCycles_[group];
     periodTicks = periodTicks_[group];
+    delayTicks = delayTicks_[group];
     offTicks = offTicks_[group];
     ticksToEvent = ticksToEvent_[group];
     dutyPercent = dutyPercent_[group];
@@ -495,20 +526,25 @@ uint64_t remainingMilliseconds(uint8_t group) {
                                        : 0U;
   uint64_t ticks = 0;
   if (waiting) {
-    ticks = static_cast<uint64_t>(cyclesRemaining) * periodTicks;
+    ticks = static_cast<uint64_t>(cyclesRemaining) *
+            (periodTicks + delayTicks);
   } else if (phase == Phase::Delay) {
     ticks = ticksToEvent +
             static_cast<uint64_t>(cyclesRemaining) * periodTicks;
+    if (cyclesRemaining > 0U) {
+      ticks += static_cast<uint64_t>(cyclesRemaining - 1U) * delayTicks;
+    }
   } else {
     ticks = ticksToEvent;
     if (phase == Phase::On && dutyPercent != 100U) {
       ticks += offTicks;
     }
     if (cyclesRemaining > 0U) {
-      ticks += static_cast<uint64_t>(cyclesRemaining - 1U) * periodTicks;
+      ticks += static_cast<uint64_t>(cyclesRemaining - 1U) *
+               (periodTicks + delayTicks);
     }
   }
-  return ticks * 1000ULL / TIMER_TICKS_PER_SECOND;
+  return ticks / (TIMER_TICKS_PER_SECOND / 1000UL);
 }
 
 bool takeGroupFinished(uint8_t group) {

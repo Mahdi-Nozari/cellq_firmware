@@ -134,6 +134,14 @@ void setMonitorChannelStatus(uint8_t channel, uint8_t image) {
                     gui::MONITOR_CHANNEL_IMAGE_FIRST + channel, image);
 }
 
+void setMonitorPageStatus(uint8_t image) {
+  if (image > 2U) {
+    return;
+  }
+  genie.WriteObject(gui::USERIMAGES_OBJECT,
+                    gui::MONITOR_PAGE_STATUS_IMAGE, image);
+}
+
 void setMonitorPressureLabel(uint8_t channel, int16_t tenths) {
   if (channel >= hw::CHANNEL_COUNT) {
     return;
@@ -144,16 +152,20 @@ void setMonitorPressureLabel(uint8_t channel, int16_t tenths) {
 }
 
 void addMonitorScopeSample(uint8_t channel, uint16_t value) {
-  if (channel >= hw::CHANNEL_COUNT || value > 100U) {
+  if (channel >= hw::CHANNEL_COUNT ||
+      value > config::MONITOR_SCOPE_VALUE_MAX) {
     return;
   }
-  genie.WriteObject(gui::SCOPE_OBJECT,
-                    gui::MONITOR_SCOPE_FIRST + channel, value);
+  const uint8_t group = channel / gui::MONITOR_SCOPE_TRACES;
+  genie.WriteObject(gui::SCOPE_OBJECT, gui::MONITOR_GROUP_SCOPE[group], value);
 }
 
 void setSquareLabel(uint8_t index, const char *text) {
-  if (index < gui::SQUARE_NAME_LABEL ||
-      index > gui::SQUARE_GROUP_1_DELAY_LABEL || text == nullptr) {
+  const bool runLabel = index >= gui::SQUARE_NAME_LABEL &&
+                        index <= gui::SQUARE_GROUP_2_DELAY_LABEL;
+  const bool totalLabel = index == gui::SQUARE_TOTAL_CYCLES_LABEL[0] ||
+                          index == gui::SQUARE_TOTAL_CYCLES_LABEL[1];
+  if (text == nullptr || (!runLabel && !totalLabel)) {
     return;
   }
   genie.WriteInhLabel(index, text);
@@ -201,14 +213,6 @@ void setSquareDataLogSwitch(bool enabled) {
                     enabled ? 1 : 0);
 }
 
-void addSquareScopeSample(uint8_t group, uint16_t value) {
-  if (group >= hw::REGULATOR_COUNT || value > 100U) {
-    return;
-  }
-  genie.WriteObject(gui::SCOPE_OBJECT, gui::SQUARE_GROUP_SCOPE[group],
-                    value);
-}
-
 void setPresetSelectName(uint8_t slot, const char *text) {
   if (slot >= config::SQUARE_PRESET_SLOT_COUNT || text == nullptr) {
     return;
@@ -222,13 +226,27 @@ void setSquareSetupLabel(uint8_t index, const char *text) {
   }
   bool valid = index == gui::SETUP_NAME_LABEL;
   for (uint8_t group = 0; group < hw::REGULATOR_COUNT; ++group) {
-    for (uint8_t parameter = 0; parameter < 4U; ++parameter) {
+    for (uint8_t parameter = 0;
+         parameter < gui::SETUP_PARAMETER_COUNT; ++parameter) {
       valid = valid || index == gui::SETUP_PARAMETER_LABEL[group][parameter];
     }
   }
   if (valid) {
     genie.WriteInhLabel(index, text);
   }
+}
+
+void setSquareSetupCycleModeSwitch(bool cycleMode) {
+  genie.WriteObject(gui::ISWITCH_OBJECT,
+                    gui::SETUP_CYCLE_MODE_SWITCH, cycleMode ? 1U : 0U);
+}
+
+void setSquareSetupModeImage(uint8_t group, bool timeMode) {
+  if (group >= hw::REGULATOR_COUNT) {
+    return;
+  }
+  genie.WriteObject(gui::USERIMAGES_OBJECT,
+                    gui::SETUP_MODE_IMAGE[group], timeMode ? 1U : 0U);
 }
 
 void setSquareSetupChannel(uint8_t channel, bool enabled) {
@@ -238,6 +256,11 @@ void setSquareSetupChannel(uint8_t channel, bool enabled) {
   genie.WriteObject(gui::USERBUTTON_OBJECT,
                     gui::SETUP_CHANNEL_BUTTON_FIRST + channel,
                     enabled ? 0U : 1U);
+}
+
+void setSquareSetupSaveButton(bool savedImage) {
+  genie.WriteObject(gui::USERBUTTON_OBJECT, gui::SETUP_SAVE_BUTTON,
+                    savedImage ? 1U : 0U);
 }
 
 void setPresetNameEntry(const char *text) {

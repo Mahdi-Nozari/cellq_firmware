@@ -56,8 +56,9 @@ constexpr uint8_t STATUS_RUNNING_IMAGE = 1;
 constexpr uint8_t STATUS_DONE_IMAGE = 2;
 constexpr uint8_t STATUS_ERROR_IMAGE = 3;
 constexpr uint8_t STATUS_PAUSED_IMAGE = 4;
-constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 25;
-constexpr uint8_t RUNTIME_DISPLAY_SYNC_STEP_COUNT = 10;
+constexpr uint8_t FULL_DISPLAY_SYNC_STEP_COUNT = 27;
+constexpr uint8_t DISPLAY_SYNC_PASS_COUNT = 2;
+constexpr uint8_t READY_WRITE_COUNT = 2;
 constexpr int16_t PROGRESS_NOT_SENT = -2;
 constexpr int16_t PROGRESS_BLANK = -1;
 constexpr char UNAVAILABLE_PRESET_NAME[] = "---";
@@ -74,7 +75,6 @@ bool presetSelectVisible_ = false;
 PresetSelectDestination presetSelectDestination_ =
     PresetSelectDestination::Run;
 bool presetLoaded_ = false;
-bool presetPageSynchronized_ = false;
 bool pauseAtCycleBoundary_ =
     cellq::config::SQUARE_PAUSE_AT_CYCLE_DEFAULT;
 uint8_t progressGroup_ = 0;
@@ -85,13 +85,12 @@ uint32_t displayedRemainingCycles_[GROUP_COUNT] = {UINT32_MAX, UINT32_MAX};
 int16_t displayedProgress_ = PROGRESS_NOT_SENT;
 uint32_t lastRuntimeDisplayMs_ = 0;
 bool displaySyncPending_ = false;
-bool fullDisplaySync_ = false;
 uint8_t displaySyncStep_ = 0;
+uint8_t displaySyncPass_ = 0;
 uint32_t displaySyncLastMs_ = 0;
-bool scopePreviewPending_ = false;
-uint8_t scopePreviewGroup_ = 0;
-uint16_t scopeSample_ = 0;
-uint32_t scopeLastWriteMs_ = 0;
+bool readySyncPending_ = false;
+uint8_t readyWriteCount_ = 0;
+uint32_t readyLastWriteMs_ = 0;
 char presetNames_[cellq::config::SQUARE_PRESET_SLOT_COUNT][21] = {};
 bool presetAvailable_[cellq::config::SQUARE_PRESET_SLOT_COUNT] = {};
 bool presetListCached_ = false;
@@ -171,7 +170,8 @@ uint64_t configuredTimeMs(uint8_t group) {
       activePreset_.totalCycles[group] == 0U) {
     return UINT64_MAX;
   }
-  return activePreset_.delayMs[group] +
+  return static_cast<uint64_t>(activePreset_.totalCycles[group]) *
+             activePreset_.delayMs[group] +
          static_cast<uint64_t>(activePreset_.totalCycles[group]) *
              10000ULL / activePreset_.frequencyTenthsHz[group];
 }
@@ -228,6 +228,8 @@ bool loadSelectedPreset(uint16_t id, cellq::SquareWavePreset &preset) {
   return cellq::preset::loadPreset(id, preset);
 }
 
+void cancelPageSync();
+
 void beginPresetList(uint32_t now) {
   presetListScanPending_ = !presetListCached_;
   presetListWritePending_ = presetListCached_;
@@ -239,8 +241,7 @@ void beginPresetList(uint32_t now) {
 void openPresetSelector(uint32_t now,
                         PresetSelectDestination destination) {
   form2Visible_ = false;
-  displaySyncPending_ = false;
-  scopePreviewPending_ = false;
+  cancelPageSync();
   presetSelectDestination_ = destination;
   presetSelectVisible_ = true;
   beginPresetList(now);
@@ -383,7 +384,7 @@ void writeRemainingTime(uint8_t group) {
 void writeRemainingCycles(uint8_t group) {
   char text[11];
   const uint32_t cycles = remainingCycles(group);
-  if (cycles == UINT32_MAX) {
+  if (activePreset_.totalCycles[group] == 0U) {
     strcpy(text, "---");
   } else {
     const uint8_t length = appendUnsigned(text, cycles);
@@ -392,6 +393,19 @@ void writeRemainingCycles(uint8_t group) {
   cellq::display::setSquareLabel(
       cellq::gui::SQUARE_REMAINING_CYCLES_LABEL[group], text);
   displayedRemainingCycles_[group] = cycles;
+}
+
+void writeTotalCycles(uint8_t group) {
+  char text[11];
+  const uint32_t cycles = activePreset_.totalCycles[group];
+  if (cycles == 0U) {
+    strcpy(text, "---");
+  } else {
+    const uint8_t length = appendUnsigned(text, cycles);
+    text[length] = '\0';
+  }
+  cellq::display::setSquareLabel(
+      cellq::gui::SQUARE_TOTAL_CYCLES_LABEL[group], text);
 }
 
 void writeProgress() {
@@ -447,7 +461,9 @@ void stopProcedure(bool updateDisplay, uint32_t now) {
   state_ = ProcedureState::Idle;
   resetCountdowns();
   if (updateDisplay) {
+    cellq::display::setSquarePauseButton(false);
     writeAllCountdowns();
+    displayedProgress_ = PROGRESS_NOT_SENT;
     writeProcedureState();
   }
   DBG_SQUARE("STOP");
@@ -603,15 +619,18 @@ void resumeProcedure(uint32_t now) {
   DBG_SQUARE("RESUME");
 }
 
-void startDisplaySync(uint32_t now, bool fullSync) {
+void cancelPageSync() {
+  displaySyncPending_ = false;
+  readySyncPending_ = false;
+}
+
+void startDisplaySync(uint32_t now) {
   displaySyncPending_ = true;
-  fullDisplaySync_ = fullSync;
   displaySyncStep_ = 0;
   displaySyncLastMs_ =
       now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
-  scopePreviewPending_ = false;
-  scopePreviewGroup_ = 0;
-  scopeSample_ = 0;
+  displayedProgress_ = PROGRESS_NOT_SENT;
+  readySyncPending_ = false;
 }
 
 void writeGroupParameter(uint8_t group, uint8_t parameter) {
@@ -658,61 +677,32 @@ void writeFullDisplaySyncStep() {
     writeRemainingCycles(displaySyncStep_ - 11U);
     return;
   }
-  if (displaySyncStep_ <= 18U) {
-    const uint8_t channel = displaySyncStep_ - 13U;
+  if (displaySyncStep_ <= 14U) {
+    writeTotalCycles(displaySyncStep_ - 13U);
+    return;
+  }
+  if (displaySyncStep_ <= 20U) {
+    const uint8_t channel = displaySyncStep_ - 15U;
     cellq::display::setSquareChannelEnabled(
         channel, activePreset_.channelEnabled[channel] != 0U);
     return;
   }
   switch (displaySyncStep_) {
-    case 19:
-      cellq::display::setSquareStatus(statusImage());
-      break;
-    case 20:
-      cellq::display::setSquareStartButton(procedureActive());
-      break;
     case 21:
-      cellq::display::setSquarePauseButton(
-          state_ == ProcedureState::Paused);
+      cellq::display::setSquareStatus(statusImage());
       break;
     case 22:
-      cellq::display::setSquarePauseAtCycleSwitch(
-          pauseAtCycleBoundary_);
-      break;
-    case 23:
-      cellq::display::setSquareDataLogSwitch(cellq::logger::enabled());
-      break;
-    default:
-      writeProgress();
-      break;
-  }
-}
-
-void writeRuntimeDisplaySyncStep() {
-  if (displaySyncStep_ <= 1U) {
-    writeRemainingTime(displaySyncStep_);
-    return;
-  }
-  if (displaySyncStep_ <= 3U) {
-    writeRemainingCycles(displaySyncStep_ - 2U);
-    return;
-  }
-  switch (displaySyncStep_) {
-    case 4:
-      cellq::display::setSquareStatus(statusImage());
-      break;
-    case 5:
       cellq::display::setSquareStartButton(procedureActive());
       break;
-    case 6:
+    case 23:
       cellq::display::setSquarePauseButton(
           state_ == ProcedureState::Paused);
       break;
-    case 7:
+    case 24:
       cellq::display::setSquarePauseAtCycleSwitch(
           pauseAtCycleBoundary_);
       break;
-    case 8:
+    case 25:
       cellq::display::setSquareDataLogSwitch(cellq::logger::enabled());
       break;
     default:
@@ -728,82 +718,47 @@ void updateDisplaySync(uint32_t now) {
     return;
   }
   displaySyncLastMs_ = now;
-  if (fullDisplaySync_) {
-    writeFullDisplaySyncStep();
-  } else {
-    writeRuntimeDisplaySyncStep();
-  }
+  writeFullDisplaySyncStep();
   ++displaySyncStep_;
-  const uint8_t stepCount =
-      fullDisplaySync_ ? FULL_DISPLAY_SYNC_STEP_COUNT
-                       : RUNTIME_DISPLAY_SYNC_STEP_COUNT;
-  if (displaySyncStep_ < stepCount) {
+  if (displaySyncStep_ < FULL_DISPLAY_SYNC_STEP_COUNT) {
     return;
   }
   displaySyncPending_ = false;
-  if (fullDisplaySync_) {
-    scopePreviewPending_ = true;
-    scopePreviewGroup_ = 0;
-    scopeSample_ = 0;
-    scopeLastWriteMs_ = now;
-  } else {
-    cellq::display::setSquarePresetReady(true);
-    DBG_SQUARE("READY");
+  ++displaySyncPass_;
+  if (displaySyncPass_ < DISPLAY_SYNC_PASS_COUNT) {
+    startDisplaySync(now);
+    return;
   }
+  readySyncPending_ = true;
+  readyWriteCount_ = 0;
+  readyLastWriteMs_ =
+      now - cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS;
 }
 
-uint16_t previewValue(uint8_t group, uint16_t sample) {
-  if (activePreset_.frequencyTenthsHz[group] == 0U ||
-      activePreset_.dutyPercent[group] == 0U) {
-    return cellq::config::SQUARE_SCOPE_LOW_VALUE;
-  }
-  const uint32_t sampleTimeMs =
-      static_cast<uint32_t>(sample) *
-      cellq::config::SQUARE_SCOPE_PREVIEW_MS /
-      cellq::config::SQUARE_SCOPE_SAMPLE_COUNT;
-  const uint32_t phase =
-      sampleTimeMs * activePreset_.frequencyTenthsHz[group] % 10000UL;
-  return activePreset_.dutyPercent[group] == 100U ||
-                 phase <
-                     static_cast<uint32_t>(activePreset_.dutyPercent[group]) *
-                         100UL
-             ? cellq::config::SQUARE_SCOPE_HIGH_VALUE
-             : cellq::config::SQUARE_SCOPE_LOW_VALUE;
-}
-
-void finishPageSync() {
-  scopePreviewPending_ = false;
-  presetPageSynchronized_ = true;
+void finishPageSync(uint32_t now) {
+  readySyncPending_ = false;
   if (procedureAdvancing()) {
     refreshRuntimeSnapshot();
-    updateRuntimeDisplay(lastRuntimeDisplayMs_ +
-                         cellq::config::SQUARE_RUNTIME_DISPLAY_INTERVAL_MS);
+    updateRuntimeDisplay(now);
   }
-  cellq::display::setSquarePresetReady(true);
   DBG_SQUARE("READY");
 }
 
-void updateScopePreview(uint32_t now) {
-  if (!scopePreviewPending_ ||
-      static_cast<uint32_t>(now - scopeLastWriteMs_) <
+void updateReadySync(uint32_t now) {
+  if (!readySyncPending_ ||
+      static_cast<uint32_t>(now - readyLastWriteMs_) <
           cellq::config::SQUARE_DISPLAY_WRITE_INTERVAL_MS) {
     return;
   }
-  scopeLastWriteMs_ = now;
-  cellq::display::addSquareScopeSample(
-      scopePreviewGroup_, previewValue(scopePreviewGroup_, scopeSample_));
-  ++scopeSample_;
-  if (scopeSample_ < cellq::config::SQUARE_SCOPE_SAMPLE_COUNT) {
-    return;
-  }
-  scopeSample_ = 0;
-  ++scopePreviewGroup_;
-  if (scopePreviewGroup_ >= GROUP_COUNT) {
-    finishPageSync();
+  readyLastWriteMs_ = now;
+  cellq::display::setSquarePresetReady(true);
+  ++readyWriteCount_;
+  if (readyWriteCount_ >= READY_WRITE_COUNT) {
+    finishPageSync(now);
   }
 }
 
-void beginPageSync(uint32_t now, bool fullSync) {
+void beginPageSync(uint32_t now) {
   cellq::display::setSquarePresetReady(false);
   for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
     displayedMinute_[group] = UINT32_MAX;
@@ -811,7 +766,8 @@ void beginPageSync(uint32_t now, bool fullSync) {
   }
   displayedProgress_ = PROGRESS_NOT_SENT;
   lastRuntimeDisplayMs_ = now;
-  startDisplaySync(now, fullSync);
+  displaySyncPass_ = 0;
+  startDisplaySync(now);
 }
 
 void loadPreset1(uint32_t now) {
@@ -823,10 +779,9 @@ void loadPreset1(uint32_t now) {
     copyFactoryPreset(1U, activePreset_);
   }
   presetLoaded_ = true;
-  presetPageSynchronized_ = false;
   state_ = ProcedureState::Idle;
   resetCountdowns();
-  beginPageSync(now, true);
+  beginPageSync(now);
   if (loadedFromSd) {
     DBG_SQUARE("LOAD,1,SD");
   } else {
@@ -835,27 +790,21 @@ void loadPreset1(uint32_t now) {
 }
 
 void openSquarePage(uint32_t now) {
+  if (form2Visible_ && (displaySyncPending_ || readySyncPending_)) {
+    return;
+  }
+  cancelPageSync();
   form2Visible_ = true;
   presetSelectVisible_ = false;
   presetListScanPending_ = false;
   presetListWritePending_ = false;
-  if (displaySyncPending_ || scopePreviewPending_) {
-    return;
-  }
   if (!presetLoaded_) {
     loadPreset1(now);
-  } else if (!presetPageSynchronized_) {
-    beginPageSync(now, true);
-    DBG_PRESET_CACHE(activePreset_.id);
-  } else if (procedureActive() || state_ == ProcedureState::Done ||
-             state_ == ProcedureState::Error) {
+  } else {
     if (procedureActive()) {
       refreshRuntimeSnapshot();
     }
-    beginPageSync(now, false);
-    DBG_PRESET_CACHE(activePreset_.id);
-  } else {
-    cellq::display::setSquarePresetReady(true);
+    beginPageSync(now);
     DBG_PRESET_CACHE(activePreset_.id);
   }
 }
@@ -879,20 +828,32 @@ void selectPreset(uint8_t slot, uint32_t now) {
   presetListScanPending_ = false;
   presetListWritePending_ = false;
   if (presetSelectDestination_ == PresetSelectDestination::Setup) {
-    cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
     cellq::setup::showSelectedPreset(candidate, now);
+    cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
     DBG_SQUARE("SELECT,SETUP");
     return;
   }
 
   activePreset_ = candidate;
   presetLoaded_ = true;
-  presetPageSynchronized_ = false;
   state_ = ProcedureState::Idle;
   resetCountdowns();
-  form2Visible_ = true;
   cellq::display::activateForm(cellq::gui::SQUARE_FORM);
-  beginPageSync(now, true);
+  openSquarePage(now);
+}
+
+void returnFromPresetSelector(uint32_t now) {
+  presetSelectVisible_ = false;
+  presetListScanPending_ = false;
+  presetListWritePending_ = false;
+  if (presetSelectDestination_ == PresetSelectDestination::Setup) {
+    cellq::setup::returnFromPresetSelector(now);
+    cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
+  } else {
+    cellq::display::activateForm(cellq::gui::SQUARE_FORM);
+    openSquarePage(now);
+  }
+  DBG_SQUARE("SELECT,BACK");
 }
 }
 
@@ -906,11 +867,9 @@ void begin() {
   presetSelectVisible_ = false;
   presetSelectDestination_ = PresetSelectDestination::Run;
   presetLoaded_ = false;
-  presetPageSynchronized_ = false;
   pauseAtCycleBoundary_ = config::SQUARE_PAUSE_AT_CYCLE_DEFAULT;
   displayedProgress_ = PROGRESS_NOT_SENT;
-  displaySyncPending_ = false;
-  scopePreviewPending_ = false;
+  cancelPageSync();
   presetListCached_ = false;
   presetListScanPending_ = false;
   presetListWritePending_ = false;
@@ -933,7 +892,7 @@ void update(uint32_t now) {
       if (waveform::takeBoundaryPaused()) {
         completeBoundaryPause();
       } else if (form2Visible_ && !displaySyncPending_ &&
-                 !scopePreviewPending_) {
+                 !readySyncPending_) {
         updateRuntimeDisplay(now);
       }
     }
@@ -950,7 +909,7 @@ void update(uint32_t now) {
     return;
   }
   updateDisplaySync(now);
-  updateScopePreview(now);
+  updateReadySync(now);
 }
 
 void handleDisplayEvent(const display::Event &event, uint32_t now) {
@@ -959,8 +918,7 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
       openSquarePage(now);
     } else if (event.index == gui::PRESET_SELECT_FORM) {
       form2Visible_ = false;
-      displaySyncPending_ = false;
-      scopePreviewPending_ = false;
+      cancelPageSync();
       if (procedureActive()) {
         presetSelectVisible_ = false;
         cellq::display::activateForm(gui::SQUARE_FORM);
@@ -976,12 +934,16 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
     } else {
       form2Visible_ = false;
       presetSelectVisible_ = false;
-      displaySyncPending_ = false;
-      scopePreviewPending_ = false;
+      cancelPageSync();
       presetListScanPending_ = false;
       presetListWritePending_ = false;
       presetSelectDestination_ = PresetSelectDestination::Run;
     }
+    return;
+  }
+  if (presetSelectVisible_ && event.object == gui::USERBUTTON_OBJECT &&
+      event.index == gui::PRESET_SELECT_BACK_BUTTON && event.value <= 1U) {
+    returnFromPresetSelector(now);
     return;
   }
   if (presetSelectVisible_ && event.object == gui::USERBUTTON_OBJECT &&
@@ -1064,11 +1026,9 @@ bool setActivePreset(const SquareWavePreset &preset) {
   }
   activePreset_ = preset;
   presetLoaded_ = true;
-  presetPageSynchronized_ = false;
   state_ = ProcedureState::Idle;
   resetCountdowns();
-  displaySyncPending_ = false;
-  scopePreviewPending_ = false;
+  cancelPageSync();
   return true;
 }
 
@@ -1079,6 +1039,11 @@ bool openPresetSelectorForSetup(uint32_t now) {
   }
   openPresetSelector(now, PresetSelectDestination::Setup);
   return true;
+}
+
+void leaveRunPage() {
+  form2Visible_ = false;
+  cancelPageSync();
 }
 
 void invalidatePresetList() {

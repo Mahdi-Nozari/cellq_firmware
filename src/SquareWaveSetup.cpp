@@ -9,24 +9,34 @@
 #include "RtcClock.h"
 #include "SquareWaveMode.h"
 #include "SquareWavePreset.h"
+#include "WaveformTimer.h"
 
 namespace {
-constexpr uint8_t PARAMETER_COUNT = 4U;
+constexpr uint8_t PARAMETER_COUNT = cellq::gui::SETUP_PARAMETER_COUNT;
 constexpr uint8_t SYNC_STEP_COUNT =
-    1U + cellq::hw::REGULATOR_COUNT * PARAMETER_COUNT +
+    3U + cellq::hw::REGULATOR_COUNT +
+    cellq::hw::REGULATOR_COUNT * PARAMETER_COUNT +
     cellq::hw::CHANNEL_COUNT;
+constexpr uint8_t MODE_SYNC_STEP_COUNT =
+    cellq::hw::REGULATOR_COUNT * 2U;
 constexpr uint8_t UNKNOWN_FORM = 0xFFU;
 
 cellq::SquareWavePreset draft_ = {};
 bool draftValid_ = false;
 bool formVisible_ = false;
 bool nameEntryVisible_ = false;
+bool selectorDraftPending_ = false;
+bool saveFeedbackActive_ = false;
+uint32_t saveFeedbackStartedMs_ = 0;
 bool syncPending_ = false;
+bool modeSyncOnly_ = false;
 uint8_t syncStep_ = 0;
 uint8_t currentForm_ = UNKNOWN_FORM;
 uint32_t lastSyncMs_ = 0;
 char nameEntry_[21] = {};
 uint8_t nameLength_ = 0;
+bool cycleMode_ = true;
+uint32_t enteredTimeMinutes_[cellq::hw::REGULATOR_COUNT] = {};
 
 uint8_t appendUnsigned(char *text, uint32_t value) {
   char reverse[10];
@@ -78,6 +88,33 @@ void formatHundredths(char *text, uint32_t hundredths) {
   text[position] = '\0';
 }
 
+void formatHoursMinutes(char *text, uint32_t totalMinutes) {
+  const uint32_t hours = totalMinutes / 60UL;
+  const uint8_t minutes = totalMinutes % 60UL;
+  uint8_t position = 0;
+  if (hours < 10UL) {
+    text[position++] = '0';
+  }
+  position += appendUnsigned(text + position, hours);
+  text[position++] = ':';
+  text[position++] = static_cast<char>('0' + minutes / 10U);
+  text[position++] = static_cast<char>('0' + minutes % 10U);
+  text[position] = '\0';
+}
+
+void resetMode() {
+  cycleMode_ = true;
+  for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT; ++group) {
+    enteredTimeMinutes_[group] = 0U;
+  }
+}
+
+void updateCyclesFromTime(uint8_t group) {
+  draft_.totalCycles[group] = cellq::waveform::cyclesForDurationMinutes(
+      enteredTimeMinutes_[group], draft_.frequencyTenthsHz[group],
+      draft_.delayMs[group]);
+}
+
 void writeParameter(uint8_t group, uint8_t parameter) {
   char text[16];
   if (parameter == 0U) {
@@ -87,8 +124,13 @@ void writeParameter(uint8_t group, uint8_t parameter) {
   } else if (parameter == 2U) {
     const uint8_t position = appendUnsigned(text, draft_.dutyPercent[group]);
     text[position] = '\0';
-  } else {
+  } else if (parameter == 3U) {
     formatHundredths(text, (draft_.delayMs[group] + 5UL) / 10UL);
+  } else if (!cycleMode_) {
+    formatHoursMinutes(text, enteredTimeMinutes_[group]);
+  } else {
+    const uint8_t position = appendUnsigned(text, draft_.totalCycles[group]);
+    text[position] = '\0';
   }
   cellq::display::setSquareSetupLabel(
       cellq::gui::SETUP_PARAMETER_LABEL[group][parameter], text);
@@ -96,24 +138,59 @@ void writeParameter(uint8_t group, uint8_t parameter) {
 
 void beginSync(uint32_t now) {
   syncPending_ = true;
+  modeSyncOnly_ = false;
+  syncStep_ = 0;
+  lastSyncMs_ = now - cellq::config::SETUP_DISPLAY_WRITE_INTERVAL_MS;
+}
+
+void beginModeSync(uint32_t now) {
+  if (syncPending_ && !modeSyncOnly_) {
+    beginSync(now);
+    return;
+  }
+  syncPending_ = true;
+  modeSyncOnly_ = true;
   syncStep_ = 0;
   lastSyncMs_ = now - cellq::config::SETUP_DISPLAY_WRITE_INTERVAL_MS;
 }
 
 void writeSyncStep() {
+  if (modeSyncOnly_) {
+    if (syncStep_ < cellq::hw::REGULATOR_COUNT) {
+      cellq::display::setSquareSetupModeImage(syncStep_, !cycleMode_);
+    } else {
+      writeParameter(syncStep_ - cellq::hw::REGULATOR_COUNT,
+                     PARAMETER_COUNT - 1U);
+    }
+    return;
+  }
   if (syncStep_ == 0U) {
+    cellq::display::setSquareSetupSaveButton(saveFeedbackActive_);
+    return;
+  }
+  if (syncStep_ == 1U) {
     cellq::display::setSquareSetupLabel(cellq::gui::SETUP_NAME_LABEL,
                                         draft_.name);
     return;
   }
+  if (syncStep_ == 2U) {
+    cellq::display::setSquareSetupCycleModeSwitch(cycleMode_);
+    return;
+  }
+  if (syncStep_ < 3U + cellq::hw::REGULATOR_COUNT) {
+    cellq::display::setSquareSetupModeImage(syncStep_ - 3U,
+                                            !cycleMode_);
+    return;
+  }
   const uint8_t parameterSteps =
       cellq::hw::REGULATOR_COUNT * PARAMETER_COUNT;
-  if (syncStep_ <= parameterSteps) {
-    const uint8_t offset = syncStep_ - 1U;
+  const uint8_t parameterStart = 3U + cellq::hw::REGULATOR_COUNT;
+  if (syncStep_ < parameterStart + parameterSteps) {
+    const uint8_t offset = syncStep_ - parameterStart;
     writeParameter(offset / PARAMETER_COUNT, offset % PARAMETER_COUNT);
     return;
   }
-  const uint8_t channel = syncStep_ - parameterSteps - 1U;
+  const uint8_t channel = syncStep_ - parameterStart - parameterSteps;
   cellq::display::setSquareSetupChannel(
       channel, draft_.channelEnabled[channel] != 0U);
 }
@@ -125,6 +202,7 @@ bool loadDraft(uint16_t id, uint32_t now) {
   }
   draft_ = candidate;
   draftValid_ = true;
+  resetMode();
   beginSync(now);
   return true;
 }
@@ -151,6 +229,7 @@ void openNameEntry() {
   nameLength_ = strlen(nameEntry_);
   formVisible_ = false;
   nameEntryVisible_ = true;
+  saveFeedbackActive_ = false;
   syncPending_ = false;
   currentForm_ = cellq::gui::PRESET_NAME_FORM;
   cellq::display::activateForm(cellq::gui::PRESET_NAME_FORM);
@@ -190,6 +269,31 @@ void commitNameEntry(uint32_t now) {
   DBG_SETUP("NAME,SET");
 }
 
+void cancelNameEntry(uint32_t now, bool activateForm) {
+  nameEntryVisible_ = false;
+  formVisible_ = true;
+  currentForm_ = cellq::gui::SQUARE_SETUP_FORM;
+  strcpy(nameEntry_, draft_.name);
+  nameLength_ = strlen(nameEntry_);
+  if (activateForm) {
+    cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
+  }
+  beginSync(now);
+  DBG_SETUP("NAME,CANCEL");
+}
+
+void restoreDraftAfterSelector(uint32_t now) {
+  if (!selectorDraftPending_ || !draftValid_) {
+    return;
+  }
+  selectorDraftPending_ = false;
+  formVisible_ = true;
+  nameEntryVisible_ = false;
+  currentForm_ = cellq::gui::SQUARE_SETUP_FORM;
+  beginSync(now);
+  DBG_SETUP("SELECT,BACK");
+}
+
 void enterSetup(uint32_t now, bool activateForm) {
   if (cellq::square::isProcedureActive()) {
     DBG_SETUP("LOCKED");
@@ -197,6 +301,8 @@ void enterSetup(uint32_t now, bool activateForm) {
   }
   formVisible_ = true;
   nameEntryVisible_ = false;
+  selectorDraftPending_ = false;
+  saveFeedbackActive_ = false;
   currentForm_ = cellq::gui::SQUARE_SETUP_FORM;
   if (activateForm) {
     cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
@@ -231,8 +337,29 @@ void makeNewDraft(uint32_t now) {
     draft_.channelEnabled[channel] = 1U;
   }
   draftValid_ = true;
+  resetMode();
   beginSync(now);
   DBG_SETUP("NEW");
+}
+
+void setCycleMode(bool cycleMode, uint32_t now) {
+  if (cycleMode_ == cycleMode) {
+    return;
+  }
+  cycleMode_ = cycleMode;
+  if (!cycleMode_) {
+    for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT;
+         ++group) {
+      enteredTimeMinutes_[group] = 0U;
+      draft_.totalCycles[group] = 0U;
+    }
+  }
+  beginModeSync(now);
+  if (cycleMode_) {
+    DBG_SETUP("MODE,CYCLES");
+  } else {
+    DBG_SETUP("MODE,TIME");
+  }
 }
 
 void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
@@ -261,6 +388,9 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
       value -= cellq::config::SETUP_FREQUENCY_STEP_TENTHS_HZ;
     }
     draft_.frequencyTenthsHz[group] = value;
+    if (!cycleMode_) {
+      updateCyclesFromTime(group);
+    }
   } else if (parameter == 2U) {
     uint8_t value = draft_.dutyPercent[group];
     if (increase) {
@@ -273,7 +403,7 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
                   : 0U;
     }
     draft_.dutyPercent[group] = value;
-  } else {
+  } else if (parameter == 3U) {
     uint16_t value = draft_.delayMs[group];
     if (increase) {
       value = value <= cellq::config::SQUARE_DELAY_MAX_MS -
@@ -286,6 +416,26 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
                   : 0U;
     }
     draft_.delayMs[group] = value;
+    if (!cycleMode_) {
+      updateCyclesFromTime(group);
+    }
+  } else {
+    uint32_t value = cycleMode_ ? draft_.totalCycles[group]
+                                : enteredTimeMinutes_[group];
+    const uint32_t step = cycleMode_
+        ? cellq::config::SETUP_CYCLE_STEP
+        : cellq::config::SETUP_TIME_STEP_MINUTES;
+    if (increase) {
+      value = value <= UINT32_MAX - step ? value + step : UINT32_MAX;
+    } else {
+      value = value >= step ? value - step : 0U;
+    }
+    if (cycleMode_) {
+      draft_.totalCycles[group] = value;
+    } else {
+      enteredTimeMinutes_[group] = value;
+      updateCyclesFromTime(group);
+    }
   }
   writeParameter(group, parameter);
 }
@@ -303,17 +453,22 @@ void toggleChannel(uint8_t channel) {
 
 void saveDraft() {
   if (!draftValid_ || draft_.id <= 2U) {
+    cellq::display::setSquareSetupSaveButton(false);
     DBG_SETUP("SAVE,READONLY");
     return;
   }
   char timestamp[16];
   cellq::clock::timestamp(timestamp);
   if (!cellq::preset::saveUserPreset(draft_, timestamp)) {
+    cellq::display::setSquareSetupSaveButton(false);
     DBG_SETUP("SAVE,FAIL");
     return;
   }
   cellq::square::invalidatePresetList();
   cellq::square::setActivePreset(draft_);
+  saveFeedbackActive_ = true;
+  cellq::display::setSquareSetupSaveButton(true);
+  saveFeedbackStartedMs_ = millis();
   DBG_SETUP("SAVE,OK");
 }
 
@@ -351,6 +506,7 @@ void deleteDraft(uint32_t now) {
   }
   draft_ = next;
   draftValid_ = true;
+  resetMode();
   cellq::square::setActivePreset(draft_);
   beginSync(now);
   DBG_SETUP("DELETE,OK");
@@ -380,11 +536,24 @@ void begin() {
   draftValid_ = false;
   formVisible_ = false;
   nameEntryVisible_ = false;
+  selectorDraftPending_ = false;
+  saveFeedbackActive_ = false;
   syncPending_ = false;
+  modeSyncOnly_ = false;
   currentForm_ = UNKNOWN_FORM;
+  resetMode();
 }
 
 void update(uint32_t now) {
+  if (saveFeedbackActive_ &&
+      static_cast<uint32_t>(now - saveFeedbackStartedMs_) >=
+          config::SETUP_SAVE_FEEDBACK_MS) {
+    saveFeedbackActive_ = false;
+    if (formVisible_) {
+      display::setSquareSetupSaveButton(false);
+      return;
+    }
+  }
   if (!formVisible_ || !draftValid_ || !syncPending_ ||
       static_cast<uint32_t>(now - lastSyncMs_) <
           config::SETUP_DISPLAY_WRITE_INTERVAL_MS) {
@@ -393,9 +562,12 @@ void update(uint32_t now) {
   lastSyncMs_ = now;
   writeSyncStep();
   ++syncStep_;
-  if (syncStep_ >= SYNC_STEP_COUNT) {
+  if (syncStep_ >=
+      (modeSyncOnly_ ? MODE_SYNC_STEP_COUNT : SYNC_STEP_COUNT)) {
     syncPending_ = false;
-    DBG_SETUP("READY");
+    if (!modeSyncOnly_) {
+      DBG_SETUP("READY");
+    }
   }
 }
 
@@ -409,15 +581,15 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
         currentForm_ = gui::SQUARE_FORM;
         DBG_SETUP("LOCKED");
       } else if (nameEntryVisible_ && draftValid_) {
-        nameEntryVisible_ = false;
-        formVisible_ = true;
-        beginSync(now);
-        DBG_SETUP("NAME,CANCEL");
+        cancelNameEntry(now, false);
+      } else if (selectorDraftPending_ && draftValid_) {
+        restoreDraftAfterSelector(now);
       } else if (!formVisible_) {
         enterSetup(now, false);
       }
     } else if (event.index == gui::PRESET_NAME_FORM) {
       formVisible_ = false;
+      saveFeedbackActive_ = false;
       syncPending_ = false;
       if (square::isProcedureActive()) {
         nameEntryVisible_ = false;
@@ -430,9 +602,17 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
         display::activateForm(gui::SQUARE_SETUP_FORM);
         enterSetup(now, false);
       }
+    } else if (event.index == gui::PRESET_SELECT_FORM &&
+               selectorDraftPending_) {
+      formVisible_ = false;
+      nameEntryVisible_ = false;
+      saveFeedbackActive_ = false;
+      syncPending_ = false;
     } else {
       formVisible_ = false;
       nameEntryVisible_ = false;
+      selectorDraftPending_ = false;
+      saveFeedbackActive_ = false;
       syncPending_ = false;
       draftValid_ = false;
     }
@@ -446,6 +626,18 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
                event.index == gui::PRESET_NAME_SET_BUTTON &&
                event.value <= 1U) {
       commitNameEntry(now);
+    } else if (event.object == gui::USERBUTTON_OBJECT &&
+               event.index == gui::PRESET_NAME_BACK_BUTTON &&
+               event.value <= 1U) {
+      cancelNameEntry(now, true);
+    }
+    return;
+  }
+  if (event.object == gui::ISWITCH_OBJECT &&
+      event.index == gui::SETUP_CYCLE_MODE_SWITCH) {
+    if (formVisible_ && draftValid_ &&
+        currentForm_ == gui::SQUARE_SETUP_FORM && event.value <= 1U) {
+      setCycleMode(event.value != 0U, now);
     }
     return;
   }
@@ -458,6 +650,10 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
       (currentForm_ == gui::MONITOR_FORM &&
        event.index == gui::MONITOR_SETUP_BUTTON);
   if (setupRequest) {
+    if (currentForm_ == gui::SQUARE_FORM &&
+        !square::isProcedureActive()) {
+      square::leaveRunPage();
+    }
     enterSetup(now, true);
     return;
   }
@@ -471,8 +667,9 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   if (event.index == gui::SETUP_PRESET_SELECT_BUTTON) {
     if (square::openPresetSelectorForSetup(now)) {
       formVisible_ = false;
+      saveFeedbackActive_ = false;
       syncPending_ = false;
-      draftValid_ = false;
+      selectorDraftPending_ = true;
       currentForm_ = gui::PRESET_SELECT_FORM;
     }
     return;
@@ -482,7 +679,9 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
     return;
   }
   if (event.index == gui::SETUP_SAVE_BUTTON) {
-    saveDraft();
+    if (event.value == 1U && !saveFeedbackActive_) {
+      saveDraft();
+    }
     return;
   }
   if (event.index == gui::SETUP_DELETE_BUTTON) {
@@ -507,9 +706,16 @@ void showSelectedPreset(const SquareWavePreset &preset, uint32_t now) {
   draftValid_ = true;
   formVisible_ = true;
   nameEntryVisible_ = false;
+  selectorDraftPending_ = false;
+  saveFeedbackActive_ = false;
   currentForm_ = gui::SQUARE_SETUP_FORM;
+  resetMode();
   beginSync(now);
   DBG_SETUP("SELECT");
+}
+
+void returnFromPresetSelector(uint32_t now) {
+  restoreDraftAfterSelector(now);
 }
 }
 }

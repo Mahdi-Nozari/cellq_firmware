@@ -15,6 +15,7 @@ int16_t channelPressureTenths(uint8_t channel);
 bool copyPresetForEditing(uint16_t id, SquareWavePreset &preset);
 bool setActivePreset(const SquareWavePreset &preset);
 bool openPresetSelectorForSetup(uint32_t now);
+void leaveRunPage();
 void invalidatePresetList();
 }
 }
