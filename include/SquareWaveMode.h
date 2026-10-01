@@ -12,6 +12,7 @@ bool isProcedureActive();
 bool isProcedureRunning();
 bool isChannelEnabled(uint8_t channel);
 int16_t channelPressureTenths(uint8_t channel);
+bool copyActivePreset(SquareWavePreset &preset);
 bool copyPresetForEditing(uint16_t id, SquareWavePreset &preset);
 bool setActivePreset(const SquareWavePreset &preset);
 bool openPresetSelectorForSetup(uint32_t now);

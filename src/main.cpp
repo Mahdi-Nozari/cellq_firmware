@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "Debug.h"
 #include "Display.h"
+#include "DisplayObjectMap.h"
 #include "HardwareConfig.h"
 #include "ManualMode.h"
 #include "MonitorMode.h"
@@ -56,6 +57,10 @@ void loop() {
   cellq::display::Event event;
   while (cellq::display::nextEvent(event)) {
     const uint32_t eventTime = millis();
+    if (event.object == cellq::gui::FORM_OBJECT &&
+        event.index == cellq::gui::HOME_FORM) {
+      cellq::display::setHomeVersionLabel();
+    }
     cellq::square::handleDisplayEvent(event, eventTime);
     cellq::setup::handleDisplayEvent(event, eventTime);
     cellq::monitor::handleDisplayEvent(event, eventTime);

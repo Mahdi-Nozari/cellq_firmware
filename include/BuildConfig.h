@@ -34,6 +34,7 @@ namespace cellq {
 namespace config {
 constexpr uint32_t DEBUG_BAUD = 250000UL;
 constexpr uint32_t DISPLAY_BAUD = 200000UL;
+constexpr char FIRMWARE_VERSION_TEXT[] = "1.0.0";
 constexpr uint16_t DISPLAY_STARTUP_MS = 3500U;
 constexpr uint8_t DISPLAY_EVENT_QUEUE_SIZE = 8U;
 constexpr uint8_t DISPLAY_TX_QUEUE_SIZE = 40U;
@@ -46,7 +47,12 @@ constexpr uint16_t REGULATOR_FULL_SCALE_TENTHS = 820U;
 constexpr uint16_t REGULATOR_DAC_MAX_CODE = 4095U;
 constexpr uint16_t REGULATOR_SAFE_DAC_CODE = 0U;
 constexpr uint32_t I2C_TIMEOUT_US = 25000UL;
-constexpr uint16_t MANUAL_TIME_DEFAULT_SECONDS = 0U;
+constexpr uint8_t MANUAL_TIME_DEFAULT_SECONDS = 0U;
+constexpr uint8_t MANUAL_TIME_DEFAULT_MINUTES = 0U;
+constexpr uint8_t MANUAL_TIME_DEFAULT_HOURS = 0U;
+constexpr uint8_t MANUAL_TIME_MAX_SECONDS = 59U;
+constexpr uint8_t MANUAL_TIME_MAX_MINUTES = 59U;
+constexpr uint8_t MANUAL_TIME_MAX_HOURS = 120U;
 constexpr int16_t SQUARE_PRESSURE_MIN_TENTHS = -800;
 constexpr int16_t SQUARE_PRESSURE_MAX_TENTHS = 0;
 constexpr uint16_t SQUARE_FREQUENCY_MIN_TENTHS_HZ = 1U;

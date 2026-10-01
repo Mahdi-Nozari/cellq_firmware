@@ -825,6 +825,10 @@ void selectPreset(uint8_t slot, uint32_t now) {
     cellq::display::setPresetSelectName(slot, UNAVAILABLE_PRESET_NAME);
     return;
   }
+  if (presetSelectDestination_ == PresetSelectDestination::Setup &&
+      !cellq::square::setActivePreset(candidate)) {
+    return;
+  }
 
   presetSelectVisible_ = false;
   presetListScanPending_ = false;
@@ -1020,6 +1024,14 @@ int16_t channelPressureTenths(uint8_t channel) {
 
 bool copyPresetForEditing(uint16_t id, SquareWavePreset &preset) {
   return findPresetForList(id, preset);
+}
+
+bool copyActivePreset(SquareWavePreset &preset) {
+  if (!presetLoaded_) {
+    return false;
+  }
+  preset = activePreset_;
+  return true;
 }
 
 bool setActivePreset(const SquareWavePreset &preset) {

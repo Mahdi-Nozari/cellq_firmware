@@ -195,9 +195,11 @@ void writeSyncStep() {
       channel, draft_.channelEnabled[channel] != 0U);
 }
 
-bool loadDraft(uint16_t id, uint32_t now) {
+bool loadDraft(uint32_t now, bool &fromActive) {
   cellq::SquareWavePreset candidate = {};
-  if (!cellq::square::copyPresetForEditing(id, candidate)) {
+  fromActive = cellq::square::copyActivePreset(candidate);
+  if (!fromActive &&
+      !cellq::square::copyPresetForEditing(1U, candidate)) {
     return false;
   }
   draft_ = candidate;
@@ -308,13 +310,18 @@ void enterSetup(uint32_t now, bool activateForm) {
     cellq::display::activateForm(cellq::gui::SQUARE_SETUP_FORM);
     cellq::display::service();
   }
-  if (!loadDraft(1U, now)) {
+  bool fromActive = false;
+  if (!loadDraft(now, fromActive)) {
     draftValid_ = false;
     syncPending_ = false;
     DBG_SETUP("LOAD,FAIL");
     return;
   }
-  DBG_SETUP("LOAD,1");
+  if (fromActive) {
+    DBG_SETUP("LOAD,ACTIVE");
+  } else {
+    DBG_SETUP("LOAD,1");
+  }
 }
 
 void makeNewDraft(uint32_t now) {

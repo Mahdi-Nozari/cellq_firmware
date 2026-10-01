@@ -40,10 +40,10 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,LCD,DROP,<command>,<index>` | A display command was discarded after a failed retry, because newer navigation took priority, because the transmit queue filled, or because label text exceeded 20 characters. Repeated messages indicate a communication problem; report any missing label. |
 | `D,P,<regulator>,<tenths>` | A manual pressure setting changed. |
 | `D,DAC,<regulator>,<code>,<result>` | An MCP4725 command was attempted. |
-| `D,T,<channel>,<seconds>` | A manual valve time setting changed. |
+| `D,T,<channel>,<seconds>` | A manual hour, minute, or second field changed; the value is the resulting combined duration in seconds. |
 | `D,V,<channel>,<state>` | A physical valve output command was issued. |
 | `D,TO,<channel>` | A timed valve reached its duration and was automatically switched off. |
-| `D,M,SYNC` | The current Manual-mode pressure and time values were sent to the LCD labels. |
+| `D,M,SYNC` | Current Manual-mode pressure, HH:MM:SS fields, selector states, valve switches, and group-link switches were queued for LCD synchronization. |
 | `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
 | `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
 | `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
@@ -57,7 +57,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,RTC,OK` | The PCF8523 was found and its time is initialized without a lost-power flag. |
 | `D,RTC,INVALID` | The PCF8523 responded but its time cannot be trusted; saves use the zero timestamp. |
 | `D,RTC,FAIL` | The PCF8523 did not respond; saves use the zero timestamp. |
-| `D,SET,LOAD,1` | Form 4 loaded factory preset 1 into the setup draft. |
+| `D,SET,LOAD,ACTIVE` | Form 4 copied the currently active Run preset into the setup draft. |
+| `D,SET,LOAD,1` | Form 4 used factory preset 1 because no Run preset had been loaded yet. |
 | `D,SET,SELECT` | A validated Form 7 preset was loaded into the Form 4 draft. |
 | `D,SET,SELECT,BACK` | Form 7 Back restored the unsaved Form 4 draft without selecting a preset. |
 | `D,SET,NAME,OPEN` | Form 6 opened with the current draft name in ILabelB64. |
@@ -162,12 +163,14 @@ This message shows that the firmware received an event. It does not by itself me
 
 | LCD object | Index | Function |
 |---|---:|---|
-| Form | 1 | Synchronize Manual-mode pressure and time labels |
+| Form | 1 | Synchronize Manual-mode pressure, HH:MM:SS fields, selectors, and valve switches |
 | ISwitch | 0-5 | Valve channels 1-6 |
+| ISwitch | 9 / 10 | Link channels 1-3 to channel 1 / channels 4-6 to channel 4 |
 | Userbutton | 5 / 4 | Regulator 1 pressure minus / plus |
 | Userbutton | 6 / 7 | Regulator 2 pressure minus / plus |
 | Userbutton | 9-14 | Time minus for channels 1-6 |
 | Userbutton | 15-20 | Time plus for channels 1-6 |
+| Userbutton | 109-114 | Select seconds (value 0), minutes (1), or hours (2) for channels 1-6 |
 
 The numeric `cmd` and `object` fields come from the Genie library. The Workshop project must use the object types and indices above and must have the necessary Report Events enabled.
 
@@ -321,7 +324,9 @@ Example:
 D,T,3,8
 ```
 
-This means the configured Manual-mode time for valve channel 3 changed to 8 seconds.
+This means the configured Manual-mode time for valve channel 3 changed to a combined duration of 8 seconds. For example, setting 01:02:03 reports 3723 seconds. The raw `D,E` event identifies which selector or plus/minus button was pressed.
+
+When ISwitch9 or ISwitch10 is ON, changing the group's first channel also copies its time to the two followers. Their time buttons are ignored. Copying a changed follower time can produce `D,T` for that follower.
 
 A value of `0` means fully manual operation: the valve remains in the requested switch state until another switch command. For a nonzero value, the duration is captured when the valve is switched on. Editing the displayed time while that valve is already on does not change the active duration.
 
@@ -342,6 +347,8 @@ D,V,2,0
 - State `0`: the firmware commanded the valve output OFF (`LOW`)
 
 This confirms the software output command. It does not prove the electrical output, valve movement, airflow, or pneumatic fail state.
+
+When a group link is ON, switching channel 1 or 4 produces `D,V` for all three channels in that group; their display switches follow. A follower can still be switched independently. Turning a link ON mid-run does not command valves; the next master switch action controls the whole group. A timed master expiry also turns all three OFF.
 
 ## Valve-timeout message
 
@@ -364,17 +371,19 @@ The firmware commands the physical valve output OFF before sending the LCD switc
 D,M,SYNC
 ```
 
-This means the firmware processed the report event for Manual Form 1 and sent the current values to these LCD labels:
+This means the firmware processed the report event for Manual Form 1 and queued the current values for these LCD controls:
 
 - Regulator 1 and regulator 2 pressure labels
-- Valve channel 1-6 time labels
+- Valve channel 1-6 hour, minute, and second labels, unit selectors, and switches
+- ISwitch9 and ISwitch10 group-link states
 
-LCD label writes contain only the numeric values. The `kPa` and `s` units are static text in the Workshop GUI and are not sent by the firmware.
+LCD label writes contain only numeric values. Time fields are zero-padded to at least two digits. The `kPa` and time units are static text in the Workshop GUI and are not sent by the firmware.
 
 The stored Manual defaults are:
 
 - Pressure: `0.0 kPa` for both regulators
-- Valve time: `0 s` for all six channels
+- Valve time: `00:00:00` for all six channels, with seconds selected
+- Group links: OFF for both groups
 
 This message confirms that the write functions were called. Visual confirmation on the LCD still depends on the correct Workshop label indices, display baud rate, serial wiring, and Report Event configuration.
 

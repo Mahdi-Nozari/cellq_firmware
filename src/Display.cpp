@@ -327,12 +327,24 @@ bool nextEvent(Event &event) {
   return true;
 }
 
+void setHomeVersionLabel() {
+  queueLabel(gui::HOME_VERSION_LABEL, config::FIRMWARE_VERSION_TEXT);
+}
+
 void setManualSwitch(uint8_t channel, bool on) {
   if (channel >= hw::CHANNEL_COUNT) {
     return;
   }
   queueObject(gui::ISWITCH_OBJECT,
               gui::MANUAL_VALVE_SWITCH_FIRST + channel, on ? 1 : 0);
+}
+
+void setManualGroupLinkSwitch(uint8_t group, bool linked) {
+  if (group >= hw::REGULATOR_COUNT) {
+    return;
+  }
+  queueObject(gui::ISWITCH_OBJECT,
+              gui::MANUAL_GROUP_LINK_SWITCH[group], linked ? 1U : 0U);
 }
 
 void setManualPressureLabel(uint8_t regulator, int16_t tenths) {
@@ -344,14 +356,26 @@ void setManualPressureLabel(uint8_t regulator, int16_t tenths) {
   queueLabel(gui::MANUAL_PRESSURE_LABEL[regulator], text);
 }
 
-void setManualTimeLabel(uint8_t channel, uint16_t seconds) {
-  if (channel >= hw::CHANNEL_COUNT) {
+void setManualTimeLabel(uint8_t channel, uint8_t unit, uint8_t value) {
+  if (channel >= hw::CHANNEL_COUNT || unit >= 3U) {
     return;
   }
-  char text[6];
-  uint8_t pos = appendUnsigned(text, seconds);
+  char text[4];
+  uint8_t pos = 0;
+  if (value < 10U) {
+    text[pos++] = '0';
+  }
+  pos += appendUnsigned(text + pos, value);
   text[pos] = '\0';
-  queueLabel(gui::MANUAL_TIME_LABEL_FIRST + channel, text);
+  queueLabel(gui::MANUAL_TIME_LABEL[unit][channel], text);
+}
+
+void setManualTimeSelector(uint8_t channel, uint8_t unit) {
+  if (channel >= hw::CHANNEL_COUNT || unit >= 3U) {
+    return;
+  }
+  queueObject(gui::USERBUTTON_OBJECT,
+              gui::MANUAL_TIME_SELECTOR_FIRST + channel, unit);
 }
 
 void setMonitorChannelStatus(uint8_t channel, uint8_t image) {
