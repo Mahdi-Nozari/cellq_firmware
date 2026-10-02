@@ -370,12 +370,12 @@ void setManualTimeLabel(uint8_t channel, uint8_t unit, uint8_t value) {
   queueLabel(gui::MANUAL_TIME_LABEL[unit][channel], text);
 }
 
-void setManualTimeSelector(uint8_t channel, uint8_t unit) {
+void setManualTimeUnitImage(uint8_t channel, uint8_t unit) {
   if (channel >= hw::CHANNEL_COUNT || unit >= 3U) {
     return;
   }
-  queueObject(gui::USERBUTTON_OBJECT,
-              gui::MANUAL_TIME_SELECTOR_FIRST + channel, unit);
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::MANUAL_TIME_UNIT_IMAGE_FIRST + channel, unit);
 }
 
 void setMonitorChannelStatus(uint8_t channel, uint8_t image) {

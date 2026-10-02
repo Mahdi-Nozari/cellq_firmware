@@ -88,6 +88,16 @@
     }                                                                         \
   } while (0)
 
+#define DBG_MANUAL_UNIT(c, u)                                                 \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 20) {                                   \
+      Serial.print(F("D,M,UNIT,"));                                          \
+      Serial.print(c);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(u);                                                      \
+    }                                                                         \
+  } while (0)
+
 #define DBG_VALVE(c, v)                                                       \
   do {                                                                        \
     if (Serial.availableForWrite() >= 18) {                                   \
@@ -251,6 +261,7 @@
 #define DBG_PRESSURE(r, v) do { } while (0)
 #define DBG_DAC(r, c, o) do { } while (0)
 #define DBG_TIME(c, v) do { } while (0)
+#define DBG_MANUAL_UNIT(c, u) do { } while (0)
 #define DBG_VALVE(c, v) do { } while (0)
 #define DBG_TIMEOUT(c) do { } while (0)
 #define DBG_MANUAL_SYNC() do { } while (0)

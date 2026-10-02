@@ -26,6 +26,8 @@ constexpr uint8_t MANUAL_TIME_PLUS_FIRST = 15;
 constexpr uint8_t MANUAL_TIME_PLUS_LAST = 20;
 constexpr uint8_t MANUAL_TIME_SELECTOR_FIRST = 109;
 constexpr uint8_t MANUAL_TIME_SELECTOR_LAST = 114;
+constexpr uint8_t MANUAL_TIME_UNIT_IMAGE_FIRST = 17;
+constexpr uint8_t MANUAL_TIME_UNIT_IMAGE_LAST = 22;
 constexpr uint8_t MANUAL_TIME_LABEL[3][6] = {
     {2, 3, 4, 5, 6, 7},
     {70, 71, 72, 73, 74, 75},

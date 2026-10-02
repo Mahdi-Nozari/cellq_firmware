@@ -51,8 +51,8 @@ void refreshLabels() {
       cellq::display::setManualTimeLabel(channel, unit,
                                         timeFields_[channel][unit]);
     }
-    cellq::display::setManualTimeSelector(channel,
-                                          selectedTimeUnit_[channel]);
+    cellq::display::setManualTimeUnitImage(channel,
+                                           selectedTimeUnit_[channel]);
     cellq::display::setManualSwitch(channel, valveOn_[channel]);
   }
   DBG_MANUAL_SYNC();
@@ -139,8 +139,8 @@ void copyMasterTime(uint8_t group) {
     if (selectedTimeUnit_[channel] != selectedTimeUnit_[master]) {
       selectedTimeUnit_[channel] = selectedTimeUnit_[master];
       if (formVisible_) {
-        cellq::display::setManualTimeSelector(channel,
-                                              selectedTimeUnit_[channel]);
+        cellq::display::setManualTimeUnitImage(channel,
+                                               selectedTimeUnit_[channel]);
       }
     }
     if (changed) {
@@ -300,21 +300,23 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   }
   if (event.index >= gui::MANUAL_TIME_SELECTOR_FIRST &&
       event.index <= gui::MANUAL_TIME_SELECTOR_LAST) {
-    if (event.value <= Hours) {
-      const uint8_t channel =
-          event.index - gui::MANUAL_TIME_SELECTOR_FIRST;
-      if (linkedFollower(channel)) {
-        if (event.value != selectedTimeUnit_[channel]) {
-          display::setManualTimeSelector(channel,
-                                         selectedTimeUnit_[channel]);
-        }
-      } else if (selectedTimeUnit_[channel] != event.value) {
-        selectedTimeUnit_[channel] = static_cast<uint8_t>(event.value);
-        const uint8_t group = groupFor(channel);
-        if (groupLinked_[group]) {
-          copyMasterTime(group);
-        }
-      }
+    if (event.value != 0U) {
+      return;
+    }
+    const uint8_t channel = event.index - gui::MANUAL_TIME_SELECTOR_FIRST;
+    if (linkedFollower(channel)) {
+      return;
+    }
+    if (selectedTimeUnit_[channel] == Hours) {
+      selectedTimeUnit_[channel] = Seconds;
+    } else {
+      ++selectedTimeUnit_[channel];
+    }
+    display::setManualTimeUnitImage(channel, selectedTimeUnit_[channel]);
+    DBG_MANUAL_UNIT(channel + 1U, selectedTimeUnit_[channel]);
+    const uint8_t group = groupFor(channel);
+    if (groupLinked_[group]) {
+      copyMasterTime(group);
     }
     return;
   }

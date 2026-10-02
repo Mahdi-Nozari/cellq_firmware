@@ -41,9 +41,10 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,P,<regulator>,<tenths>` | A manual pressure setting changed. |
 | `D,DAC,<regulator>,<code>,<result>` | An MCP4725 command was attempted. |
 | `D,T,<channel>,<seconds>` | A manual hour, minute, or second field changed; the value is the resulting combined duration in seconds. |
+| `D,M,UNIT,<channel>,<unit>` | A Manual time-unit button press selected seconds (0), minutes (1), or hours (2). |
 | `D,V,<channel>,<state>` | A physical valve output command was issued. |
 | `D,TO,<channel>` | A timed valve reached its duration and was automatically switched off. |
-| `D,M,SYNC` | Current Manual-mode pressure, HH:MM:SS fields, selector states, valve switches, and group-link switches were queued for LCD synchronization. |
+| `D,M,SYNC` | Current Manual-mode pressure, HH:MM:SS fields, unit images, valve switches, and group-link switches were queued for LCD synchronization. |
 | `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
 | `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
 | `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
@@ -163,16 +164,18 @@ This message shows that the firmware received an event. It does not by itself me
 
 | LCD object | Index | Function |
 |---|---:|---|
-| Form | 1 | Synchronize Manual-mode pressure, HH:MM:SS fields, selectors, and valve switches |
+| Form | 1 | Synchronize Manual-mode pressure, HH:MM:SS fields, unit images, and valve switches |
 | ISwitch | 0-5 | Valve channels 1-6 |
 | ISwitch | 9 / 10 | Link channels 1-3 to channel 1 / channels 4-6 to channel 4 |
 | Userbutton | 5 / 4 | Regulator 1 pressure minus / plus |
 | Userbutton | 6 / 7 | Regulator 2 pressure minus / plus |
 | Userbutton | 9-14 | Time minus for channels 1-6 |
 | Userbutton | 15-20 | Time plus for channels 1-6 |
-| Userbutton | 109-114 | Select seconds (value 0), minutes (1), or hours (2) for channels 1-6 |
+| Userbutton | 109-114 | Momentary unit buttons for channels 1-6; each OnChanged release reports value 0 and advances the unit |
 
 The numeric `cmd` and `object` fields come from the Genie library. The Workshop project must use the object types and indices above and must have the necessary Report Events enabled.
+
+UserImages17-22 display the selected unit for channels 1-6: image 0 seconds, image 1 minutes, image 2 hours. These are output objects, not touch-event sources.
 
 Form 0 also reports activation. Moving from Manual Form 1 to Form 0 hides the Manual controls but deliberately preserves its current outputs and valve timers. Operational events received while Form 1 is hidden are logged as `D,E,...` but are ignored by Manual mode.
 
@@ -324,7 +327,9 @@ Example:
 D,T,3,8
 ```
 
-This means the configured Manual-mode time for valve channel 3 changed to a combined duration of 8 seconds. For example, setting 01:02:03 reports 3723 seconds. The raw `D,E` event identifies which selector or plus/minus button was pressed.
+This means the configured Manual-mode time for valve channel 3 changed to a combined duration of 8 seconds. For example, setting 01:02:03 reports 3723 seconds. The raw `D,E` event identifies which plus/minus button was pressed.
+
+Each accepted unit-button press also reports `D,M,UNIT,<channel>,<unit>`. The unit cycles 0 to 1 to 2 to 0; a linked follower's unit-button press is ignored.
 
 When ISwitch9 or ISwitch10 is ON, changing the group's first channel also copies its time to the two followers. Their time buttons are ignored. Copying a changed follower time can produce `D,T` for that follower.
 
@@ -374,7 +379,7 @@ D,M,SYNC
 This means the firmware processed the report event for Manual Form 1 and queued the current values for these LCD controls:
 
 - Regulator 1 and regulator 2 pressure labels
-- Valve channel 1-6 hour, minute, and second labels, unit selectors, and switches
+- Valve channel 1-6 hour, minute, and second labels, UserImages17-22 unit images, and valve switches
 - ISwitch9 and ISwitch10 group-link states
 
 LCD label writes contain only numeric values. Time fields are zero-padded to at least two digits. The `kPa` and time units are static text in the Workshop GUI and are not sent by the firmware.
