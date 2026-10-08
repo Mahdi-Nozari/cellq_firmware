@@ -386,6 +386,15 @@ void setMonitorChannelStatus(uint8_t channel, uint8_t image) {
               gui::MONITOR_CHANNEL_IMAGE_FIRST + channel, image);
 }
 
+void setMonitorLeakStatus(uint8_t channel, bool detected) {
+  if (channel >= hw::CHANNEL_COUNT) {
+    return;
+  }
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::MONITOR_LEAK_IMAGE_FIRST + channel,
+              detected ? 1U : 0U);
+}
+
 void setMonitorPageStatus(uint8_t image) {
   if (image > 2U) {
     return;
@@ -403,6 +412,14 @@ void setMonitorPressureLabel(uint8_t channel, int16_t tenths) {
   queueLabel(gui::MONITOR_PRESSURE_LABEL_FIRST + channel, text);
 }
 
+void setMonitorPressureUnavailable(uint8_t channel) {
+  if (channel >= hw::CHANNEL_COUNT) {
+    return;
+  }
+  constexpr char unavailable[] = {'-', '-', '-', 0};
+  queueLabel(gui::MONITOR_PRESSURE_LABEL_FIRST + channel, unavailable);
+}
+
 void addMonitorScopeSample(uint8_t channel, uint16_t value) {
   if (channel >= hw::CHANNEL_COUNT ||
       value > config::MONITOR_SCOPE_VALUE_MAX) {
@@ -410,6 +427,11 @@ void addMonitorScopeSample(uint8_t channel, uint16_t value) {
   }
   const uint8_t group = channel / gui::MONITOR_SCOPE_TRACES;
   queueObject(gui::SCOPE_OBJECT, gui::MONITOR_GROUP_SCOPE[group], value);
+}
+
+bool monitorQueueHasRoom() {
+  return !eventPriority && txCount < 4U &&
+         (txCount == 0U || txQueue[0].object != gui::FORM_OBJECT);
 }
 
 void setSquareLabel(uint8_t index, const char *text) {
@@ -437,6 +459,13 @@ void setSquareStatus(uint8_t image) {
     return;
   }
   queueObject(gui::USERIMAGES_OBJECT, gui::SQUARE_STATUS_IMAGE, image);
+}
+
+void playSquareSound(uint8_t sound) {
+  if (sound > gui::SQUARE_ERROR_SOUND) {
+    return;
+  }
+  queueObject(gui::SOUND_OBJECT, gui::SQUARE_SOUND, sound);
 }
 
 void setSquarePresetReady(bool ready) {
@@ -499,6 +528,14 @@ void setSquareSetupModeImage(uint8_t group, bool timeMode) {
   }
   queueObject(gui::USERIMAGES_OBJECT,
               gui::SETUP_MODE_IMAGE[group], timeMode ? 1U : 0U);
+}
+
+void setSquareSetupTimeFieldImage(uint8_t group, uint8_t image) {
+  if (group >= hw::REGULATOR_COUNT || image > 2U) {
+    return;
+  }
+  queueObject(gui::USERIMAGES_OBJECT,
+              gui::SETUP_TIME_FIELD_IMAGE[group], image);
 }
 
 void setSquareSetupChannel(uint8_t channel, bool enabled) {

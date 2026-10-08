@@ -29,5 +29,6 @@ uint64_t remainingMilliseconds(uint8_t group);
 bool takeGroupFinished(uint8_t group);
 bool takeBoundaryPaused();
 bool takeFinished();
+uint16_t outputRevision(uint8_t group);
 }
 }

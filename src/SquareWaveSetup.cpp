@@ -16,10 +16,20 @@ constexpr uint8_t PARAMETER_COUNT = cellq::gui::SETUP_PARAMETER_COUNT;
 constexpr uint8_t SYNC_STEP_COUNT =
     3U + cellq::hw::REGULATOR_COUNT +
     cellq::hw::REGULATOR_COUNT * PARAMETER_COUNT +
-    cellq::hw::CHANNEL_COUNT;
+    cellq::hw::CHANNEL_COUNT + cellq::hw::REGULATOR_COUNT;
 constexpr uint8_t MODE_SYNC_STEP_COUNT =
-    cellq::hw::REGULATOR_COUNT * 2U;
+    cellq::hw::REGULATOR_COUNT * 3U;
 constexpr uint8_t UNKNOWN_FORM = 0xFFU;
+constexpr uint8_t TIME_FIELD_MINUTES = 0U;
+constexpr uint8_t TIME_FIELD_HOURS = 1U;
+constexpr uint8_t TIME_FIELD_HIDDEN = 2U;
+static_assert(cellq::config::SETUP_TIME_STEP_MINUTES > 0U &&
+                  cellq::config::SETUP_TIME_STEP_MINUTES < 60U,
+              "Time minute step must be between 1 and 59");
+static_assert(cellq::config::SETUP_TIME_STEP_HOURS > 0U &&
+                  cellq::config::SETUP_TIME_STEP_HOURS <=
+                      cellq::config::SETUP_TIME_MAX_HOURS,
+              "Time hour step must fit the hour range");
 
 cellq::SquareWavePreset draft_ = {};
 bool draftValid_ = false;
@@ -35,8 +45,9 @@ uint8_t currentForm_ = UNKNOWN_FORM;
 uint32_t lastSyncMs_ = 0;
 char nameEntry_[21] = {};
 uint8_t nameLength_ = 0;
-bool cycleMode_ = true;
+bool cycleMode_ = false;
 uint32_t enteredTimeMinutes_[cellq::hw::REGULATOR_COUNT] = {};
+uint8_t selectedTimeField_[cellq::hw::REGULATOR_COUNT] = {};
 
 uint8_t appendUnsigned(char *text, uint32_t value) {
   char reverse[10];
@@ -103,10 +114,17 @@ void formatHoursMinutes(char *text, uint32_t totalMinutes) {
 }
 
 void resetMode() {
-  cycleMode_ = true;
+  cycleMode_ = false;
   for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT; ++group) {
     enteredTimeMinutes_[group] = 0U;
+    selectedTimeField_[group] = TIME_FIELD_MINUTES;
+    draft_.totalCycles[group] = cellq::config::SETUP_DEFAULT_TOTAL_CYCLES;
   }
+}
+
+void writeTimeFieldImage(uint8_t group) {
+  cellq::display::setSquareSetupTimeFieldImage(
+      group, cycleMode_ ? TIME_FIELD_HIDDEN : selectedTimeField_[group]);
 }
 
 void updateCyclesFromTime(uint8_t group) {
@@ -158,9 +176,12 @@ void writeSyncStep() {
   if (modeSyncOnly_) {
     if (syncStep_ < cellq::hw::REGULATOR_COUNT) {
       cellq::display::setSquareSetupModeImage(syncStep_, !cycleMode_);
-    } else {
+    } else if (syncStep_ < cellq::hw::REGULATOR_COUNT * 2U) {
       writeParameter(syncStep_ - cellq::hw::REGULATOR_COUNT,
                      PARAMETER_COUNT - 1U);
+    } else {
+      writeTimeFieldImage(syncStep_ -
+                          cellq::hw::REGULATOR_COUNT * 2U);
     }
     return;
   }
@@ -190,9 +211,15 @@ void writeSyncStep() {
     writeParameter(offset / PARAMETER_COUNT, offset % PARAMETER_COUNT);
     return;
   }
-  const uint8_t channel = syncStep_ - parameterStart - parameterSteps;
-  cellq::display::setSquareSetupChannel(
-      channel, draft_.channelEnabled[channel] != 0U);
+  const uint8_t channelStart = parameterStart + parameterSteps;
+  if (syncStep_ < channelStart + cellq::hw::CHANNEL_COUNT) {
+    const uint8_t channel = syncStep_ - channelStart;
+    cellq::display::setSquareSetupChannel(
+        channel, draft_.channelEnabled[channel] != 0U);
+  } else {
+    writeTimeFieldImage(syncStep_ -
+                        channelStart - cellq::hw::CHANNEL_COUNT);
+  }
 }
 
 bool loadDraft(uint32_t now, bool &fromActive) {
@@ -359,6 +386,7 @@ void setCycleMode(bool cycleMode, uint32_t now) {
     for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT;
          ++group) {
       enteredTimeMinutes_[group] = 0U;
+      selectedTimeField_[group] = TIME_FIELD_MINUTES;
       draft_.totalCycles[group] = 0U;
     }
   }
@@ -368,6 +396,52 @@ void setCycleMode(bool cycleMode, uint32_t now) {
   } else {
     DBG_SETUP("MODE,TIME");
   }
+}
+
+void selectTimeField(uint8_t group) {
+  if (cycleMode_) {
+    return;
+  }
+  selectedTimeField_[group] =
+      selectedTimeField_[group] == TIME_FIELD_MINUTES
+          ? TIME_FIELD_HOURS
+          : TIME_FIELD_MINUTES;
+  writeTimeFieldImage(group);
+  if (group == 0U) {
+    if (selectedTimeField_[group] == TIME_FIELD_HOURS) {
+      DBG_SETUP("TIME,G1,HOUR");
+    } else {
+      DBG_SETUP("TIME,G1,MIN");
+    }
+  } else if (selectedTimeField_[group] == TIME_FIELD_HOURS) {
+    DBG_SETUP("TIME,G2,HOUR");
+  } else {
+    DBG_SETUP("TIME,G2,MIN");
+  }
+}
+
+void adjustEnteredTime(uint8_t group, bool increase) {
+  uint16_t hours =
+      static_cast<uint16_t>(enteredTimeMinutes_[group] / 60UL);
+  uint8_t minutes =
+      static_cast<uint8_t>(enteredTimeMinutes_[group] % 60UL);
+  if (selectedTimeField_[group] == TIME_FIELD_HOURS) {
+    const uint8_t step = cellq::config::SETUP_TIME_STEP_HOURS;
+    const uint8_t maximum = cellq::config::SETUP_TIME_MAX_HOURS;
+    if (increase) {
+      hours = hours <= maximum - step ? hours + step : maximum;
+    } else {
+      hours = hours >= step ? hours - step : 0U;
+    }
+  } else {
+    const uint8_t step = cellq::config::SETUP_TIME_STEP_MINUTES;
+    minutes = increase
+                  ? static_cast<uint8_t>((minutes + step) % 60U)
+                  : static_cast<uint8_t>((minutes + 60U - step) % 60U);
+  }
+  enteredTimeMinutes_[group] =
+      static_cast<uint32_t>(hours) * 60UL + minutes;
+  updateCyclesFromTime(group);
 }
 
 void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
@@ -428,21 +502,17 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
       updateCyclesFromTime(group);
     }
   } else {
-    uint32_t value = cycleMode_ ? draft_.totalCycles[group]
-                                : enteredTimeMinutes_[group];
-    const uint32_t step = cycleMode_
-        ? cellq::config::SETUP_CYCLE_STEP
-        : cellq::config::SETUP_TIME_STEP_MINUTES;
-    if (increase) {
-      value = value <= UINT32_MAX - step ? value + step : UINT32_MAX;
-    } else {
-      value = value >= step ? value - step : 0U;
-    }
     if (cycleMode_) {
+      uint32_t value = draft_.totalCycles[group];
+      const uint32_t step = cellq::config::SETUP_CYCLE_STEP;
+      if (increase) {
+        value = value <= UINT32_MAX - step ? value + step : UINT32_MAX;
+      } else {
+        value = value >= step ? value - step : 0U;
+      }
       draft_.totalCycles[group] = value;
     } else {
-      enteredTimeMinutes_[group] = value;
-      updateCyclesFromTime(group);
+      adjustEnteredTime(group, increase);
     }
   }
   writeParameter(group, parameter);
@@ -512,10 +582,10 @@ void deleteDraft(uint32_t now) {
     syncPending_ = false;
     return;
   }
+  cellq::square::setActivePreset(next);
   draft_ = next;
   draftValid_ = true;
   resetMode();
-  cellq::square::setActivePreset(draft_);
   beginSync(now);
   DBG_SETUP("DELETE,OK");
 }
@@ -667,6 +737,15 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   }
   if (!formVisible_ || !draftValid_) {
     return;
+  }
+  for (uint8_t group = 0; group < hw::REGULATOR_COUNT; ++group) {
+    if (event.index == gui::SETUP_TIME_FIELD_BUTTON[group]) {
+      if (event.value == 0U &&
+          currentForm_ == gui::SQUARE_SETUP_FORM) {
+        selectTimeField(group);
+      }
+      return;
+    }
   }
   if (event.index == gui::SETUP_NAME_BUTTON) {
     openNameEntry();

@@ -26,6 +26,7 @@ bool fileCreated_ = false;
 bool testStartValid_ = false;
 uint32_t testStartMs_ = 0;
 uint32_t lastSampleMs_ = 0;
+uint32_t lastLoggedAcquisitionMs_ = UINT32_MAX;
 uint32_t lastFlushMs_ = 0;
 uint32_t sampleCount_ = 0;
 uint32_t droppedSamples_ = 0;
@@ -224,37 +225,32 @@ bool openLogging(uint32_t now) {
   }
   loggingActive_ = true;
   lastSampleMs_ = now - cellq::config::DATA_LOG_INTERVAL_MS;
+  lastLoggedAcquisitionMs_ = UINT32_MAX;
   lastFlushMs_ = now;
   DBG_LOG("ON");
   return true;
 }
 
-bool writeSample(uint32_t now, cellq::logger::State state,
+bool writeSample(const cellq::monitor::PressureSample &sample,
+                 cellq::logger::State state,
                  const uint32_t completedCycles[2]) {
-  int16_t pressure[cellq::hw::CHANNEL_COUNT];
-  uint8_t valve[cellq::hw::CHANNEL_COUNT];
-  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    pressure[channel] =
-        cellq::monitor::sampleChannelPressureTenths(channel);
-    valve[channel] =
-        digitalRead(cellq::hw::VALVE_PINS[channel]) == cellq::hw::VALVE_ON
-            ? 1U
-            : 0U;
-  }
   char line[cellq::config::DATA_LOG_LINE_BUFFER_SIZE];
   snprintf(
       line, sizeof(line),
       "SAMPLE,%lu,%s,%lu,%lu,%u,%u,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d",
-      static_cast<unsigned long>(now - testStartMs_), stateText(state),
+      static_cast<unsigned long>(sample.timeMs - testStartMs_),
+      stateText(state),
       static_cast<unsigned long>(completedCycles[0]),
       static_cast<unsigned long>(completedCycles[1]),
-      static_cast<unsigned int>(valve[0]),
-      static_cast<unsigned int>(valve[1]),
-      static_cast<unsigned int>(valve[2]),
-      static_cast<unsigned int>(valve[3]),
-      static_cast<unsigned int>(valve[4]),
-      static_cast<unsigned int>(valve[5]), pressure[0], pressure[1],
-      pressure[2], pressure[3], pressure[4], pressure[5]);
+      static_cast<unsigned int>(sample.valveOn[0]),
+      static_cast<unsigned int>(sample.valveOn[1]),
+      static_cast<unsigned int>(sample.valveOn[2]),
+      static_cast<unsigned int>(sample.valveOn[3]),
+      static_cast<unsigned int>(sample.valveOn[4]),
+      static_cast<unsigned int>(sample.valveOn[5]),
+      sample.pressureTenths[0], sample.pressureTenths[1],
+      sample.pressureTenths[2], sample.pressureTenths[3],
+      sample.pressureTenths[4], sample.pressureTenths[5]);
   if (!writeLine(line)) {
     DBG_LOG("ERR,WRITE");
     return false;
@@ -319,6 +315,7 @@ bool startTest(const SquareWavePreset &preset, uint32_t now) {
   testStartValid_ = clock::timestamp(testStart_);
   sampleCount_ = 0;
   droppedSamples_ = 0;
+  lastLoggedAcquisitionMs_ = UINT32_MAX;
   fileCreated_ = false;
   loggingActive_ = false;
   logPath_[0] = '\0';
@@ -326,11 +323,7 @@ bool startTest(const SquareWavePreset &preset, uint32_t now) {
   if (!requested_) {
     return true;
   }
-  if (!openLogging(now)) {
-    clearTestState();
-    return false;
-  }
-  return true;
+  return openLogging(now);
 }
 
 bool update(uint32_t now, State state,
@@ -347,15 +340,36 @@ bool update(uint32_t now, State state,
     droppedSamples_ += periods - 1UL;
   }
   lastSampleMs_ += periods * config::DATA_LOG_INTERVAL_MS;
-  if (!writeSample(now, state, completedCycles)) {
-    return false;
+  monitor::PressureSample sample;
+  if (!monitor::latestSample(sample) ||
+      static_cast<uint32_t>(now - sample.timeMs) >=
+          config::DATA_LOG_INTERVAL_MS ||
+      sample.timeMs == lastLoggedAcquisitionMs_) {
+    ++droppedSamples_;
+  } else {
+    const uint32_t writeStartedMs = millis();
+    if (!writeSample(sample, state, completedCycles)) {
+      return false;
+    }
+    lastLoggedAcquisitionMs_ = sample.timeMs;
+    const uint32_t writeDurationMs = millis() - writeStartedMs;
+    if (writeDurationMs >= config::DATA_LOG_INTERVAL_MS) {
+      droppedSamples_ += writeDurationMs / config::DATA_LOG_INTERVAL_MS;
+      lastSampleMs_ = millis();
+    }
   }
   if (static_cast<uint32_t>(now - lastFlushMs_) >=
       config::DATA_LOG_FLUSH_INTERVAL_MS) {
     lastFlushMs_ = now;
+    const uint32_t flushStartedMs = millis();
     if (!flushFile()) {
       DBG_LOG("ERR,FLUSH");
       return false;
+    }
+    const uint32_t flushDurationMs = millis() - flushStartedMs;
+    if (flushDurationMs >= config::DATA_LOG_INTERVAL_MS) {
+      droppedSamples_ += flushDurationMs / config::DATA_LOG_INTERVAL_MS;
+      lastSampleMs_ = millis();
     }
   }
   return true;
@@ -401,6 +415,14 @@ void abort() {
   fileCreated_ = false;
   logPath_[0] = '\0';
   DBG_LOG("ABORT");
+}
+
+void disableAfterFailure() {
+  closeFile();
+  requested_ = false;
+  fileCreated_ = false;
+  logPath_[0] = '\0';
+  DBG_LOG("DISABLED");
 }
 }
 }

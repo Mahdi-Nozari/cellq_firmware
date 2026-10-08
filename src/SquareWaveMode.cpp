@@ -457,8 +457,11 @@ void stopProcedure(bool updateDisplay, uint32_t now) {
   idleOutputs();
   if (!cellq::logger::finish(now, cellq::logger::EndReason::Stopped,
                              completedCycles_)) {
-    failProcedure(FailureCause::Logging, now);
-    return;
+    cellq::logger::abort();
+    if (form2Visible_) {
+      cellq::display::setSquareDataLogSwitch(false);
+    }
+    DBG_SQUARE("WARN,LOG,DISABLED");
   }
   state_ = ProcedureState::Idle;
   resetCountdowns();
@@ -479,10 +482,14 @@ void finishProcedure(uint32_t now) {
   }
   if (!cellq::logger::finish(now, cellq::logger::EndReason::Done,
                              completedCycles_)) {
-    failProcedure(FailureCause::Logging, now);
-    return;
+    cellq::logger::abort();
+    if (form2Visible_) {
+      cellq::display::setSquareDataLogSwitch(false);
+    }
+    DBG_SQUARE("WARN,LOG,DISABLED");
   }
   state_ = ProcedureState::Done;
+  cellq::display::playSquareSound(cellq::gui::SQUARE_DONE_SOUND);
   if (form2Visible_) {
     writeAllCountdowns();
     writeProcedureState();
@@ -501,6 +508,7 @@ void failProcedure(FailureCause cause, uint32_t now) {
     cause = FailureCause::Logging;
   }
   state_ = ProcedureState::Error;
+  cellq::display::playSquareSound(cellq::gui::SQUARE_ERROR_SOUND);
   resetCountdowns();
   if (form2Visible_) {
     if (cause == FailureCause::Logging) {
@@ -546,8 +554,11 @@ void startProcedure(uint32_t now) {
     return;
   }
   if (!cellq::logger::startTest(activePreset_, now)) {
-    failProcedure(FailureCause::Logging, now);
-    return;
+    cellq::logger::disableAfterFailure();
+    if (form2Visible_) {
+      cellq::display::setSquareDataLogSwitch(false);
+    }
+    DBG_SQUARE("WARN,LOG,DISABLED");
   }
   bool regulatorsOk = true;
   for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
@@ -905,7 +916,11 @@ void update(uint32_t now) {
   }
   if (procedureActive() &&
       !logger::update(now, loggerState(), completedCycles_)) {
-    failProcedure(FailureCause::Logging, now);
+    logger::disableAfterFailure();
+    if (form2Visible_) {
+      display::setSquareDataLogSwitch(false);
+    }
+    DBG_SQUARE("WARN,LOG,DISABLED");
   }
   if (presetSelectVisible_) {
     scanNextPresetSlot(now);
@@ -969,7 +984,9 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   if (event.object == gui::ISWITCH_OBJECT &&
       event.index == gui::SQUARE_DATA_LOG_SWITCH) {
     if (!logger::setEnabled(event.value != 0U, now)) {
-      failProcedure(FailureCause::Logging, now);
+      logger::disableAfterFailure();
+      display::setSquareDataLogSwitch(false);
+      DBG_SQUARE("WARN,LOG,DISABLED");
     }
     return;
   }

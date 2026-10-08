@@ -71,6 +71,7 @@ void loop() {
   cellq::display::endEventUpdate();
   const uint32_t now = millis();
   cellq::manual::update(now);
+  cellq::monitor::acquire(now);
   cellq::square::update(now);
   cellq::setup::update(now);
   cellq::monitor::update(now);

@@ -5,6 +5,8 @@
 #include "HardwareConfig.h"
 #include "SquareWaveMode.h"
 
+#include <WaveformTimer.h>
+
 namespace {
 constexpr uint8_t STATUS_NOT_RUNNING_IMAGE = 0;
 constexpr uint8_t STATUS_ACTIVE_IMAGE = 1;
@@ -13,7 +15,8 @@ constexpr uint8_t PAGE_LOADING_IMAGE = 0;
 constexpr uint8_t PAGE_READY_IMAGE = 1;
 constexpr uint8_t PAGE_RUNNING_IMAGE = 2;
 constexpr uint16_t SCOPE_CHANNEL_INTERVAL_MS =
-    cellq::config::MONITOR_SCOPE_UPDATE_INTERVAL_MS /
+    (cellq::config::MONITOR_SCOPE_UPDATE_INTERVAL_MS +
+     cellq::hw::CHANNEL_COUNT - 1U) /
     cellq::hw::CHANNEL_COUNT;
 constexpr uint16_t LABEL_CHANNEL_INTERVAL_MS =
     cellq::config::MONITOR_LABEL_UPDATE_INTERVAL_MS /
@@ -21,15 +24,46 @@ constexpr uint16_t LABEL_CHANNEL_INTERVAL_MS =
 
 static_assert(SCOPE_CHANNEL_INTERVAL_MS > 0,
               "Monitor scope interval is too short");
+static_assert(cellq::config::PRESSURE_ACQUISITION_INTERVAL_MS > 0,
+              "Pressure acquisition interval must be nonzero");
+static_assert(cellq::config::MONITOR_LEAK_CHECK_INTERVAL_MS >=
+                  cellq::config::PRESSURE_ACQUISITION_INTERVAL_MS,
+              "Leak check interval must allow pressure samples");
+static_assert(cellq::config::MONITOR_LEAK_THRESHOLD_PERCENT <= 100U,
+              "Leak threshold percentage must not exceed 100");
+static_assert(cellq::config::MONITOR_LEAK_THRESHOLD_PERCENT > 0U &&
+                  cellq::config::MONITOR_LEAK_MIN_ON_SAMPLES > 0U,
+              "Leak detection requires a threshold and samples");
 static_assert(LABEL_CHANNEL_INTERVAL_MS > 0,
               "Monitor label interval is too short");
 static_assert(cellq::gui::MONITOR_SCOPE_TRACES *
                       cellq::hw::REGULATOR_COUNT ==
                   cellq::hw::CHANNEL_COUNT,
               "Monitor scope mapping must cover all channels");
+static_assert(cellq::gui::MONITOR_LEAK_IMAGE_LAST -
+                      cellq::gui::MONITOR_LEAK_IMAGE_FIRST +
+                  1U == cellq::hw::CHANNEL_COUNT,
+              "Monitor leak images must cover all channels");
 
-int16_t pressureTenths_[cellq::hw::CHANNEL_COUNT] = {};
-bool pressureValid_[cellq::hw::CHANNEL_COUNT] = {};
+cellq::monitor::PressureSample latest_ = {};
+bool sampleValid_ = false;
+bool acquisitionActive_ = false;
+uint32_t lastAcquisitionMs_ = 0;
+uint16_t seenRevision_[cellq::hw::REGULATOR_COUNT] = {};
+uint32_t phaseStartMs_[cellq::hw::REGULATOR_COUNT] = {};
+int16_t settledPressure_[cellq::hw::CHANNEL_COUNT][2] = {};
+bool settledValid_[cellq::hw::CHANNEL_COUNT][2] = {};
+int16_t displayedPressure_[cellq::hw::CHANNEL_COUNT] = {};
+bool displayedValveOn_[cellq::hw::CHANNEL_COUNT] = {};
+bool displayedPressureValid_[cellq::hw::CHANNEL_COUNT] = {};
+bool displayedUnavailable_[cellq::hw::CHANNEL_COUNT] = {};
+int32_t leakPressureSum_[cellq::hw::CHANNEL_COUNT] = {};
+uint16_t leakSampleCount_[cellq::hw::CHANNEL_COUNT] = {};
+bool leakDetected_[cellq::hw::CHANNEL_COUNT] = {};
+uint8_t displayedLeak_[cellq::hw::CHANNEL_COUNT] = {};
+uint8_t leakSyncChannel_ = cellq::hw::CHANNEL_COUNT;
+uint32_t leakWindowStartMs_ = 0;
+bool leakWindowActive_ = false;
 bool formVisible_ = false;
 bool streamActive_ = false;
 uint8_t displayedTestState_ = UINT8_MAX;
@@ -81,15 +115,16 @@ void calibratePressureZeros() {
 }
 #endif
 
-int16_t readPressureTenths(uint8_t channel) {
+int16_t readPressureTenths(uint8_t channel, bool valveOn) {
 #if CELLQ_VIRTUAL_PRESSURE_SENSORS
   if (!cellq::square::isProcedureActive() ||
       !cellq::square::isChannelEnabled(channel) ||
-      digitalRead(cellq::hw::VALVE_PINS[channel]) != cellq::hw::VALVE_ON) {
+      !valveOn) {
     return 0;
   }
   return cellq::square::channelPressureTenths(channel);
 #else
+  (void)valveOn;
   const uint16_t raw = readPressureAdc(channel);
 
   // Honeywell 015PDAA5 slope with the per-channel boot zero removed.
@@ -133,16 +168,45 @@ uint16_t pressureToScopeValue(uint8_t channel, int16_t pressureTenths) {
           : scaled);
 }
 
-void sampleChannel(uint8_t channel) {
-  pressureTenths_[channel] = readPressureTenths(channel);
-  pressureValid_[channel] = true;
+void resetLeakDetection() {
+  leakWindowActive_ = false;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT;
+       ++channel) {
+    leakPressureSum_[channel] = 0;
+    leakSampleCount_[channel] = 0;
+    leakDetected_[channel] = false;
+  }
+}
+
+void evaluateLeakDetection(uint32_t now) {
+  if (!leakWindowActive_ ||
+      static_cast<uint32_t>(now - leakWindowStartMs_) <
+          cellq::config::MONITOR_LEAK_CHECK_INTERVAL_MS) {
+    return;
+  }
+  leakWindowStartMs_ = now;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT;
+       ++channel) {
+    const int16_t target =
+        cellq::square::channelPressureTenths(channel);
+    bool detected = false;
+    if (cellq::square::isProcedureRunning() &&
+        cellq::square::isChannelEnabled(channel) && target < 0 &&
+        leakSampleCount_[channel] >=
+            cellq::config::MONITOR_LEAK_MIN_ON_SAMPLES) {
+      detected =
+          static_cast<int64_t>(leakPressureSum_[channel]) * 100L >
+          static_cast<int64_t>(leakSampleCount_[channel]) * target *
+              cellq::config::MONITOR_LEAK_THRESHOLD_PERCENT;
+    }
+    leakDetected_[channel] = detected;
+    leakPressureSum_[channel] = 0;
+    leakSampleCount_[channel] = 0;
+  }
 }
 
 void stopStream() {
   streamActive_ = false;
-  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    pressureValid_[channel] = false;
-  }
 }
 
 void startStream(uint32_t now) {
@@ -150,9 +214,6 @@ void startStream(uint32_t now) {
   labelChannel_ = 0;
   lastScopeWriteMs_ = now - SCOPE_CHANNEL_INTERVAL_MS;
   lastLabelWriteMs_ = now - LABEL_CHANNEL_INTERVAL_MS;
-  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    pressureValid_[channel] = false;
-  }
 #if CELLQ_VIRTUAL_PRESSURE_SENSORS
   DBG_MONITOR_SOURCE("VIRTUAL");
 #else
@@ -172,10 +233,13 @@ void activate(uint32_t now) {
   displayedPageStatus_ = UINT8_MAX;
   loadingStatusPending_ = true;
   statusSyncChannel_ = 0;
+  leakSyncChannel_ = 0;
   lastDisplayWriteMs_ =
       now - cellq::config::MONITOR_DISPLAY_WRITE_INTERVAL_MS;
   for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
-    pressureValid_[channel] = false;
+    displayedPressureValid_[channel] = false;
+    displayedUnavailable_[channel] = false;
+    displayedLeak_[channel] = UINT8_MAX;
   }
 }
 
@@ -199,25 +263,57 @@ void writeNextStatus() {
   ++statusSyncChannel_;
 }
 
+void writeNextLeakStatus() {
+  const uint8_t channel = leakSyncChannel_;
+  cellq::display::setMonitorLeakStatus(channel,
+                                       leakDetected_[channel]);
+  displayedLeak_[channel] = leakDetected_[channel] ? 1U : 0U;
+  ++leakSyncChannel_;
+}
+
 void writeNextScope(uint32_t now) {
-  sampleChannel(scopeChannel_);
   cellq::display::addMonitorScopeSample(
       scopeChannel_,
-      pressureToScopeValue(scopeChannel_, pressureTenths_[scopeChannel_]));
+      pressureToScopeValue(scopeChannel_,
+                           latest_.pressureTenths[scopeChannel_]));
   scopeChannel_ = (scopeChannel_ + 1U) % cellq::hw::CHANNEL_COUNT;
   lastScopeWriteMs_ = now;
 }
 
-void writeNextLabel(uint32_t now) {
-  if (!pressureValid_[labelChannel_]) {
-    sampleChannel(labelChannel_);
-  }
-  cellq::display::setMonitorPressureLabel(labelChannel_,
-                                          pressureTenths_[labelChannel_]);
-  DBG_MONITOR_PRESSURE(labelChannel_ + 1U,
-                       pressureTenths_[labelChannel_]);
+bool writeNextLabel(uint32_t now) {
+  const uint8_t channel = labelChannel_;
   labelChannel_ = (labelChannel_ + 1U) % cellq::hw::CHANNEL_COUNT;
   lastLabelWriteMs_ = now;
+  if (!sampleValid_) {
+    return false;
+  }
+  const uint8_t phase = latest_.valveOn[channel];
+  if (!settledValid_[channel][phase]) {
+    if (!displayedPressureValid_[channel] &&
+        !displayedUnavailable_[channel] &&
+        cellq::display::monitorQueueHasRoom()) {
+      cellq::display::setMonitorPressureUnavailable(channel);
+      displayedUnavailable_[channel] = true;
+      return true;
+    }
+    return false;
+  }
+  const int16_t pressure = settledPressure_[channel][phase];
+  if (displayedPressureValid_[channel] &&
+      displayedPressure_[channel] == pressure &&
+      displayedValveOn_[channel] == phase) {
+    return false;
+  }
+  if (!cellq::display::monitorQueueHasRoom()) {
+    return false;
+  }
+  cellq::display::setMonitorPressureLabel(channel, pressure);
+  DBG_MONITOR_PRESSURE(channel + 1U, pressure);
+  displayedPressure_[channel] = pressure;
+  displayedValveOn_[channel] = phase;
+  displayedPressureValid_[channel] = true;
+  displayedUnavailable_[channel] = false;
+  return true;
 }
 }
 
@@ -230,13 +326,100 @@ void begin() {
   displayedPageStatus_ = UINT8_MAX;
   loadingStatusPending_ = false;
   statusSyncChannel_ = hw::CHANNEL_COUNT;
+  leakSyncChannel_ = hw::CHANNEL_COUNT;
   scopeChannel_ = 0;
+  sampleValid_ = false;
+  acquisitionActive_ = false;
+  resetLeakDetection();
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
   calibratePressureZeros();
 #endif
 }
 
+void acquire(uint32_t now) {
+  if (!square::isProcedureActive()) {
+    acquisitionActive_ = false;
+    sampleValid_ = false;
+    if (leakWindowActive_) {
+      resetLeakDetection();
+    }
+    return;
+  }
+  if (!leakWindowActive_) {
+    leakWindowStartMs_ = now;
+    leakWindowActive_ = true;
+  }
+  if (!acquisitionActive_) {
+    acquisitionActive_ = true;
+    lastAcquisitionMs_ =
+        now - config::PRESSURE_ACQUISITION_INTERVAL_MS;
+    for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
+      settledValid_[channel][0] = false;
+      settledValid_[channel][1] = false;
+    }
+  }
+  const uint32_t elapsed = now - lastAcquisitionMs_;
+  if (elapsed < config::PRESSURE_ACQUISITION_INTERVAL_MS) {
+    return;
+  }
+  lastAcquisitionMs_ +=
+      (elapsed / config::PRESSURE_ACQUISITION_INTERVAL_MS) *
+      config::PRESSURE_ACQUISITION_INTERVAL_MS;
+  uint16_t before[hw::REGULATOR_COUNT];
+  for (uint8_t group = 0; group < hw::REGULATOR_COUNT; ++group) {
+    before[group] = waveform::outputRevision(group);
+    if (!sampleValid_ || before[group] != seenRevision_[group]) {
+      seenRevision_[group] = before[group];
+      phaseStartMs_[group] = now;
+    }
+  }
+  latest_.timeMs = now;
+  for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
+    const bool valveOn =
+        digitalRead(hw::VALVE_PINS[channel]) == hw::VALVE_ON;
+    latest_.valveOn[channel] = valveOn ? 1U : 0U;
+    latest_.pressureTenths[channel] =
+        readPressureTenths(channel, valveOn);
+  }
+  for (uint8_t group = 0; group < hw::REGULATOR_COUNT; ++group) {
+    const uint16_t after = waveform::outputRevision(group);
+    if (after != before[group]) {
+      seenRevision_[group] = after;
+      phaseStartMs_[group] = now;
+      continue;
+    }
+    if (static_cast<uint32_t>(now - phaseStartMs_[group]) <
+        config::MONITOR_LABEL_SETTLE_MS) {
+      continue;
+    }
+    for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
+      if (hw::CHANNEL_TO_REGULATOR[channel] != group) {
+        continue;
+      }
+      const uint8_t phase = latest_.valveOn[channel];
+      settledPressure_[channel][phase] =
+          latest_.pressureTenths[channel];
+      settledValid_[channel][phase] = true;
+      if (square::isProcedureRunning() && phase != 0U &&
+          square::isChannelEnabled(channel) &&
+          square::channelPressureTenths(channel) < 0 &&
+          leakSampleCount_[channel] < UINT16_MAX) {
+        leakPressureSum_[channel] += latest_.pressureTenths[channel];
+        ++leakSampleCount_[channel];
+      }
+    }
+  }
+  sampleValid_ = true;
+}
+
 void update(uint32_t now) {
+  if (!square::isProcedureActive()) {
+    if (leakWindowActive_) {
+      resetLeakDetection();
+    }
+  } else {
+    evaluateLeakDetection(now);
+  }
   if (!formVisible_) {
     return;
   }
@@ -259,20 +442,50 @@ void update(uint32_t now) {
     display::setMonitorPageStatus(PAGE_LOADING_IMAGE);
     displayedPageStatus_ = PAGE_LOADING_IMAGE;
     loadingStatusPending_ = false;
+    lastDisplayWriteMs_ = now;
+    return;
   } else if (statusSyncChannel_ < hw::CHANNEL_COUNT) {
     writeNextStatus();
+    lastDisplayWriteMs_ = now;
+    return;
+  } else if (leakSyncChannel_ < hw::CHANNEL_COUNT) {
+    writeNextLeakStatus();
+    lastDisplayWriteMs_ = now;
+    return;
   } else if (pageStatus != displayedPageStatus_) {
     display::setMonitorPageStatus(pageStatus);
     displayedPageStatus_ = pageStatus;
-  } else if (!streamActive_) {
+    lastDisplayWriteMs_ = now;
     return;
-  } else if (static_cast<uint32_t>(now - lastScopeWriteMs_) >=
-             SCOPE_CHANNEL_INTERVAL_MS) {
+  }
+  for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
+    const uint8_t image = leakDetected_[channel] ? 1U : 0U;
+    if (displayedLeak_[channel] != image) {
+      if (!display::monitorQueueHasRoom()) {
+        return;
+      }
+      display::setMonitorLeakStatus(channel, leakDetected_[channel]);
+      displayedLeak_[channel] = image;
+      lastDisplayWriteMs_ = now;
+      return;
+    }
+  }
+  if (!streamActive_) {
+    return;
+  }
+  bool wrote = false;
+  if (static_cast<uint32_t>(now - lastLabelWriteMs_) >=
+      LABEL_CHANNEL_INTERVAL_MS) {
+    wrote = writeNextLabel(now);
+  }
+  if (!wrote && sampleValid_ &&
+      static_cast<uint32_t>(now - lastScopeWriteMs_) >=
+          SCOPE_CHANNEL_INTERVAL_MS &&
+      display::monitorQueueHasRoom()) {
     writeNextScope(now);
-  } else if (static_cast<uint32_t>(now - lastLabelWriteMs_) >=
-             LABEL_CHANNEL_INTERVAL_MS) {
-    writeNextLabel(now);
-  } else {
+    wrote = true;
+  }
+  if (!wrote) {
     return;
   }
   lastDisplayWriteMs_ = now;
@@ -294,8 +507,12 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
   }
 }
 
-int16_t sampleChannelPressureTenths(uint8_t channel) {
-  return channel < hw::CHANNEL_COUNT ? readPressureTenths(channel) : 0;
+bool latestSample(PressureSample &sample) {
+  if (!sampleValid_) {
+    return false;
+  }
+  sample = latest_;
+  return true;
 }
 }
 }

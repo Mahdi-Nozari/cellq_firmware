@@ -46,8 +46,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,TO,<channel>` | A timed valve reached its duration and was automatically switched off. |
 | `D,M,SYNC` | Current Manual-mode pressure, HH:MM:SS fields, unit images, valve switches, and group-link switches were queued for LCD synchronization. |
 | `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
-| `D,MON,SRC,VIRTUAL` | Form 3 is using generated pressure values and does not read A8-A13. |
-| `D,MON,SRC,ANALOG` | Form 3 is sampling the physical A8-A13 inputs. |
+| `D,MON,SRC,VIRTUAL` | The active test is using generated pressure values and does not read A8-A13. |
+| `D,MON,SRC,ANALOG` | The active test is sampling the physical A8-A13 inputs. Acquisition runs even when Form 3 is hidden; this message appears only when its stream starts. |
 | `D,MON,Z,<channel>,<adc>` | A physical sensor's averaged startup ADC value was stored as its 0 kPa reference. |
 | `D,SD,OK` | SD card initialization on D10 succeeded at boot. |
 | `D,SD,FAIL` | SD card initialization failed; both compiled factory presets remain available. |
@@ -67,8 +67,10 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SET,NAME,CANCEL` | Form 6 Back returned to Form 4 without changing the draft name. |
 | `D,SET,NAME,INVALID` | Set was ignored because the name was empty or had a leading/trailing space. |
 | `D,SET,NAME,READONLY` | Userbutton52 was ignored because a factory preset was displayed. |
-| `D,SET,READY` | The staged Form 4 labels, including total cycles in B67/B68, and channel buttons finished synchronizing. |
+| `D,SET,READY` | The staged Form 4 labels, time/cycle mode and field images, and channel buttons finished synchronizing. |
 | `D,SET,MODE,CYCLES` / `MODE,TIME` | ISwitch8 selected cycle or HH:MM time entry for B67/B68. Time mode starts at `00:00` and converts entered time to cycles, rounding down. |
+| `D,SET,TIME,G1,HOUR` / `TIME,G1,MIN` | Userbutton115 selected the hour or minute field for group 1. |
+| `D,SET,TIME,G2,HOUR` / `TIME,G2,MIN` | Userbutton116 selected the hour or minute field for group 2. |
 | `D,SET,NEW` / `NEW,FULL` | A new lowest-vacant-ID draft was created, or all user IDs are occupied. |
 | `D,SET,SAVE,OK` / `SAVE,FAIL` | Form 4 save completed or failed. On success, Userbutton55 shows image 1 for 3 seconds, then returns to image 0; Save presses during that interval are ignored. |
 | `D,SET,DELETE,OK` / `DELETE,FAIL` | Form 4 deletion completed or failed. |
@@ -80,7 +82,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,LOG,ON` | Logging started or resumed for the current test. |
 | `D,LOG,OFF` | A `LOGGING_OFF` event was flushed and the current file was closed. |
 | `D,LOG,END` | The final END record was flushed and the log closed successfully. |
-| `D,LOG,ABORT` | Logging was abandoned after an SD failure and ISwitch6 was disabled in firmware. |
+| `D,LOG,ABORT` | Logging was abandoned while ending a test or handling an already-fatal non-logging error. |
+| `D,LOG,DISABLED` | Logging was disabled after an SD failure during an otherwise continuing test. |
 | `D,LOG,ERR,<code>` | A data-log operation failed; see the logging error table below. |
 | `D,SW,LOAD,1,SD` | Square-wave preset 1 was committed from the SD file. |
 | `D,SW,LOAD,<id>,FLASH` | The matching compiled factory preset fallback was loaded. |
@@ -97,9 +100,10 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,STOP` | The Square-wave procedure stopped and outputs returned to idle. |
 | `D,SW,DONE` | Both finite groups completed their configured total cycle counts. |
 | `D,SW,WARN,DAC,IGNORED` | A DAC did not acknowledge, but the procedure continued because DAC acknowledgment enforcement is disabled. |
+| `D,SW,WARN,LOG,DISABLED` | SD logging failed and was disabled; the Square-wave procedure continues or completes normally. |
 | `D,SW,ERR,DAC` | A regulator DAC command failed while starting the procedure. |
 | `D,SW,ERR,PRESET` | A preset failed the firmware pressure, frequency, or duty validation before starting. |
-| `D,SW,ERR,LOG` | A data-log operation failed. The procedure stopped, outputs returned to idle, UserImages12 changed to ERROR, and logging was disabled. |
+| `D,SW,ERR,LOG` | A log finalization also failed while another fatal error was already stopping the procedure. Ordinary logging failures now report WARN and do not stop it. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
 
@@ -129,7 +133,7 @@ All regulator and channel numbers in the action messages are human-readable and 
 | `HEADER` | The new file could not be opened or its metadata header could not be written. |
 | `REOPEN` | A mid-test re-enable could not reopen the existing file. |
 | `EVENT` | A `LOGGING_ON` event could not be written. |
-| `WRITE` | A scheduled 20 Hz sample could not be written. |
+| `WRITE` | A scheduled 50 Hz sample could not be written. |
 | `FLUSH` | The one-second periodic flush failed. |
 | `CLOSE` | The `LOGGING_OFF` event or its flush failed. |
 | `FINALOPEN` | The closed test file could not be reopened to append END. |
@@ -301,7 +305,7 @@ Example:
 D,MON,P,2,-21
 ```
 
-This means channel 2 measured `-2.1 kPa` and that value was sent to ILabelB9. Messages follow the 2 Hz label rate, not the faster scope-sample rate. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error.
+This means channel 2's latest settled phase value was `-2.1 kPa` and was sent to ILabelB9. Messages occur only when a changed label is sent, at less than 4 updates per second per channel; unchanged readings are suppressed. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error. The underlying 100 Hz acquisition still runs for the active test, independently of Form 3.
 
 All channels are Honeywell 015PDAA5 sensors and use the same 0.5-4.5 V, +/-15 psi slope with the default 5 V ADC reference. In physical-sensor mode, firmware averages 64 readings for each channel at boot and stores that average as its per-boot 0 kPa reference. The resulting values are measurements only; they are not currently used for feedback control or a safety interlock.
 
@@ -453,15 +457,15 @@ Turning it ON again appends to the same file and reports `D,LOG,ON` without anot
 D,LOG,END
 ```
 
-Samples are intentionally not printed to USB serial. Their fixed 20 Hz rate is independent of the slower display-monitor rate. If an SD operation fails, the logger reports its specific error followed by an abort and procedure error, for example:
+Samples are intentionally not printed to USB serial. The logger aims for 50 Hz from the shared 100 Hz acquisition stream; delayed or stale samples are skipped and counted. If an SD write fails during a test, logging is disabled but the procedure continues:
 
 ```text
 D,LOG,ERR,WRITE
-D,LOG,ABORT
-D,SW,ERR,LOG
+D,LOG,DISABLED
+D,SW,WARN,LOG,DISABLED
 ```
 
-At that point all outputs are idle, UserImages12 shows ERROR image 3, and the logging switch is disabled in firmware.
+The logging switch is turned OFF in firmware (and on Form 2 if visible). The waveform and regulators continue according to the preset. The incomplete CSV may remain on the card.
 
 ### Opening Form 7 and selecting a preset
 

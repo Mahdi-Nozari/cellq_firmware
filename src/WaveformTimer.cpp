@@ -38,6 +38,8 @@ volatile bool boundaryPausedPending_ = false;
 volatile bool finishedPending_ = false;
 volatile uint32_t scheduledTicks_ = 0;
 volatile uint8_t channelMask_[GROUP_COUNT] = {};
+volatile uint16_t outputRevision_[GROUP_COUNT] = {};
+volatile bool groupOutputOn_[GROUP_COUNT] = {};
 volatile uint8_t dutyPercent_[GROUP_COUNT] = {};
 volatile uint32_t totalCycles_[GROUP_COUNT] = {};
 volatile uint32_t completedCycles_[GROUP_COUNT] = {};
@@ -53,6 +55,10 @@ volatile bool waitingAtBoundary_[GROUP_COUNT] = {};
 volatile Phase phase_[GROUP_COUNT] = {};
 
 void writeGroupOutputsUnsafe(uint8_t group, bool on) {
+  if (groupOutputOn_[group] != on) {
+    groupOutputOn_[group] = on;
+    ++outputRevision_[group];
+  }
   for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT; ++channel) {
     if (cellq::hw::CHANNEL_TO_REGULATOR[channel] != group) {
       continue;
@@ -329,6 +335,8 @@ void begin() {
 #endif
     for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
       channelMask_[group] = 0;
+      outputRevision_[group] = 0;
+      groupOutputOn_[group] = false;
       groupFinished_[group] = true;
       groupFinishedPending_[group] = false;
       waitingAtBoundary_[group] = false;
@@ -362,6 +370,8 @@ bool start(const Config &waveformConfig) {
     for (uint8_t group = 0; group < GROUP_COUNT; ++group) {
       const GroupConfig &config = waveformConfig.group[group];
       channelMask_[group] = config.channelMask;
+      outputRevision_[group] = 0;
+      groupOutputOn_[group] = false;
       dutyPercent_[group] = config.dutyPercent;
       totalCycles_[group] = config.totalCycles;
       completedCycles_[group] = 0;
@@ -575,6 +585,17 @@ bool takeFinished() {
     finishedPending_ = false;
   }
   return finished;
+}
+
+uint16_t outputRevision(uint8_t group) {
+  if (group >= GROUP_COUNT) {
+    return 0;
+  }
+  uint16_t revision;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    revision = outputRevision_[group];
+  }
+  return revision;
 }
 }
 }

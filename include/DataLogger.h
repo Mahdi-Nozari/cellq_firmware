@@ -16,5 +16,6 @@ bool update(uint32_t now, State state,
 bool finish(uint32_t now, EndReason reason,
             const uint32_t completedCycles[2]);
 void abort();
+void disableAfterFailure();
 }
 }
