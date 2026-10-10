@@ -353,5 +353,9 @@ uint32_t onTimeSeconds(uint8_t channel) {
 bool valveIsOn(uint8_t channel) {
   return channel < hw::CHANNEL_COUNT && valveOn_[channel];
 }
+
+void enterMaintenance() {
+  deactivate();
+}
 }
 }

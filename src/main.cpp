@@ -9,6 +9,7 @@
 #include "RtcClock.h"
 #include "SquareWaveMode.h"
 #include "SquareWaveSetup.h"
+#include "UsbProtocol.h"
 
 namespace {
 bool channel1LedOn_ = false;
@@ -39,7 +40,7 @@ void updateChannel1Led() {
 }
 
 void setup() {
-  DBG_BEGIN();
+  cellq::usb::begin();
   beginChannel1Led();
   cellq::manual::begin();
   cellq::clock::begin();
@@ -53,9 +54,17 @@ void setup() {
 
 void loop() {
   cellq::display::service();
+  cellq::usb::service();
   cellq::display::beginEventUpdate();
   cellq::display::Event event;
   while (cellq::display::nextEvent(event)) {
+    if (cellq::usb::maintenanceActive()) {
+      if (event.object == cellq::gui::FORM_OBJECT &&
+          event.index != cellq::gui::MAINTENANCE_FORM) {
+        cellq::usb::restoreMaintenanceForm();
+      }
+      continue;
+    }
     const uint32_t eventTime = millis();
     if (event.object == cellq::gui::FORM_OBJECT &&
         event.index == cellq::gui::HOME_FORM) {
@@ -69,6 +78,10 @@ void loop() {
     }
   }
   cellq::display::endEventUpdate();
+  if (cellq::usb::maintenanceActive()) {
+    updateChannel1Led();
+    return;
+  }
   const uint32_t now = millis();
   cellq::manual::update(now);
   cellq::monitor::acquire(now);

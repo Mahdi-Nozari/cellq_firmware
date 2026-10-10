@@ -318,6 +318,10 @@ void endEventUpdate() {
   priorityTail = 0;
 }
 
+bool idle() {
+  return txCount == 0U && !waitingForAck;
+}
+
 bool nextEvent(Event &event) {
   if (queueTail == queueHead) {
     return false;
@@ -557,6 +561,12 @@ void setPresetNameEntry(const char *text) {
     return;
   }
   queueLabel(gui::PRESET_NAME_LABEL, text);
+}
+
+void setMaintenanceStatus(const char *text) {
+  if (text != nullptr) {
+    queueLabel(gui::MAINTENANCE_STATUS_LABEL, text);
+  }
 }
 
 void activateForm(uint8_t form) {

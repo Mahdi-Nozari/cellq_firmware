@@ -13,6 +13,7 @@ void begin();
 void service();
 void beginEventUpdate();
 void endEventUpdate();
+bool idle();
 bool nextEvent(Event &event);
 void setHomeVersionLabel();
 void setManualSwitch(uint8_t channel, bool on);
@@ -44,6 +45,7 @@ void setSquareSetupTimeFieldImage(uint8_t group, uint8_t image);
 void setSquareSetupChannel(uint8_t channel, bool enabled);
 void setSquareSetupSaveButton(bool savedImage);
 void setPresetNameEntry(const char *text);
+void setMaintenanceStatus(const char *text);
 void activateForm(uint8_t form);
 }
 }

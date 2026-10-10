@@ -51,8 +51,9 @@ bool acquisitionActive_ = false;
 uint32_t lastAcquisitionMs_ = 0;
 uint16_t seenRevision_[cellq::hw::REGULATOR_COUNT] = {};
 uint32_t phaseStartMs_[cellq::hw::REGULATOR_COUNT] = {};
-int16_t settledPressure_[cellq::hw::CHANNEL_COUNT][2] = {};
-bool settledValid_[cellq::hw::CHANNEL_COUNT][2] = {};
+int16_t settledPressure_[cellq::hw::CHANNEL_COUNT] = {};
+uint8_t settledPhase_[cellq::hw::CHANNEL_COUNT] = {};
+bool settledValid_[cellq::hw::CHANNEL_COUNT] = {};
 int16_t displayedPressure_[cellq::hw::CHANNEL_COUNT] = {};
 bool displayedValveOn_[cellq::hw::CHANNEL_COUNT] = {};
 bool displayedPressureValid_[cellq::hw::CHANNEL_COUNT] = {};
@@ -76,6 +77,15 @@ uint8_t labelChannel_ = 0;
 uint32_t lastDisplayWriteMs_ = 0;
 uint32_t lastScopeWriteMs_ = 0;
 uint32_t lastLabelWriteMs_ = 0;
+
+void invalidateSettledGroup(uint8_t group) {
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT;
+       ++channel) {
+    if (cellq::hw::CHANNEL_TO_REGULATOR[channel] == group) {
+      settledValid_[channel] = false;
+    }
+  }
+}
 
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
 static_assert(cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT > 0U,
@@ -288,7 +298,11 @@ bool writeNextLabel(uint32_t now) {
     return false;
   }
   const uint8_t phase = latest_.valveOn[channel];
-  if (!settledValid_[channel][phase]) {
+  const uint8_t group =
+      cellq::hw::CHANNEL_TO_REGULATOR[channel];
+  if (!settledValid_[channel] ||
+      settledPhase_[channel] != phase ||
+      cellq::waveform::outputRevision(group) != seenRevision_[group]) {
     if (!displayedPressureValid_[channel] &&
         !displayedUnavailable_[channel] &&
         cellq::display::monitorQueueHasRoom()) {
@@ -298,7 +312,7 @@ bool writeNextLabel(uint32_t now) {
     }
     return false;
   }
-  const int16_t pressure = settledPressure_[channel][phase];
+  const int16_t pressure = settledPressure_[channel];
   if (displayedPressureValid_[channel] &&
       displayedPressure_[channel] == pressure &&
       displayedValveOn_[channel] == phase) {
@@ -354,8 +368,7 @@ void acquire(uint32_t now) {
     lastAcquisitionMs_ =
         now - config::PRESSURE_ACQUISITION_INTERVAL_MS;
     for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
-      settledValid_[channel][0] = false;
-      settledValid_[channel][1] = false;
+      settledValid_[channel] = false;
     }
   }
   const uint32_t elapsed = now - lastAcquisitionMs_;
@@ -371,6 +384,7 @@ void acquire(uint32_t now) {
     if (!sampleValid_ || before[group] != seenRevision_[group]) {
       seenRevision_[group] = before[group];
       phaseStartMs_[group] = now;
+      invalidateSettledGroup(group);
     }
   }
   latest_.timeMs = now;
@@ -386,6 +400,7 @@ void acquire(uint32_t now) {
     if (after != before[group]) {
       seenRevision_[group] = after;
       phaseStartMs_[group] = now;
+      invalidateSettledGroup(group);
       continue;
     }
     if (static_cast<uint32_t>(now - phaseStartMs_[group]) <
@@ -397,9 +412,9 @@ void acquire(uint32_t now) {
         continue;
       }
       const uint8_t phase = latest_.valveOn[channel];
-      settledPressure_[channel][phase] =
-          latest_.pressureTenths[channel];
-      settledValid_[channel][phase] = true;
+      settledPressure_[channel] = latest_.pressureTenths[channel];
+      settledPhase_[channel] = phase;
+      settledValid_[channel] = true;
       if (square::isProcedureRunning() && phase != 0U &&
           square::isChannelEnabled(channel) &&
           square::channelPressureTenths(channel) < 0 &&

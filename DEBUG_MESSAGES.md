@@ -305,7 +305,7 @@ Example:
 D,MON,P,2,-21
 ```
 
-This means channel 2's latest settled phase value was `-2.1 kPa` and was sent to ILabelB9. Messages occur only when a changed label is sent, at less than 4 updates per second per channel; unchanged readings are suppressed. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error. The underlying 100 Hz acquisition still runs for the active test, independently of Form 3.
+This means channel 2's newest qualified reading for the current valve phase was `-2.1 kPa` and was sent to ILabelB9. A valve output change invalidates the previous qualified reading, so this value is not reused from an earlier cycle. Messages occur only when a changed label is sent, at less than 4 updates per second per channel; unchanged readings are suppressed. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error. The underlying 100 Hz acquisition still runs for the active test, independently of Form 3.
 
 All channels are Honeywell 015PDAA5 sensors and use the same 0.5-4.5 V, +/-15 psi slope with the default 5 V ADC reference. In physical-sensor mode, firmware averages 64 readings for each channel at boot and stores that average as its per-boot 0 kPa reference. The resulting values are measurements only; they are not currently used for feedback control or a safety interlock.
 
