@@ -4,6 +4,7 @@
 #include "Debug.h"
 #include "DisplayObjectMap.h"
 #include "HardwareConfig.h"
+#include "Version.h"
 
 namespace {
 constexpr uint8_t MAX_LABEL_LENGTH = 20U;

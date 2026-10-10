@@ -36,7 +36,6 @@ constexpr uint32_t DEBUG_BAUD = 250000UL;
 constexpr uint8_t USB_RX_LINE_SIZE = 80U;
 constexpr uint8_t USB_DATA_CHUNK_SIZE = 48U;
 constexpr uint32_t DISPLAY_BAUD = 200000UL;
-constexpr char FIRMWARE_VERSION_TEXT[] = "1.0.1";
 constexpr uint16_t DISPLAY_STARTUP_MS = 3500U;
 constexpr uint8_t DISPLAY_EVENT_QUEUE_SIZE = 8U;
 constexpr uint8_t DISPLAY_TX_QUEUE_SIZE = 40U;

@@ -13,6 +13,7 @@
 #include "PresetStore.h"
 #include "SquareWaveMode.h"
 #include "SquareWaveSetup.h"
+#include "Version.h"
 
 namespace {
 enum class Work : uint8_t { None, List, Get, Hash, Delete };

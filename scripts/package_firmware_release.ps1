@@ -6,14 +6,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $safeRoot = $repoRoot.Replace('\', '/')
-$headerPath = Join-Path $repoRoot 'include\BuildConfig.h'
+$headerPath = Join-Path $repoRoot 'include\Version.h'
 $header = [System.IO.File]::ReadAllText($headerPath)
 $versionMatch = [regex]::Match(
   $header,
   'constexpr\s+char\s+FIRMWARE_VERSION_TEXT\[\]\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*;'
 )
 if (-not $versionMatch.Success) {
-  throw 'Could not read the firmware version from include/BuildConfig.h.'
+  throw 'Could not read the firmware version from include/Version.h.'
 }
 $version = $versionMatch.Groups[1].Value
 
