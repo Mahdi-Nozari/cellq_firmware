@@ -6,6 +6,7 @@
 #include "Debug.h"
 #include "DisplayObjectMap.h"
 #include "HardwareConfig.h"
+#include "MonitorMode.h"
 #include "PresetStore.h"
 #include "Regulator.h"
 #include "SquareWavePreset.h"
@@ -15,6 +16,7 @@
 namespace {
 enum class ProcedureState : uint8_t {
   Idle,
+  Preparing,
   Running,
   PausePending,
   Paused,
@@ -313,7 +315,8 @@ uint8_t statusImage() {
 }
 
 bool procedureActive() {
-  return state_ == ProcedureState::Running ||
+  return state_ == ProcedureState::Preparing ||
+         state_ == ProcedureState::Running ||
          state_ == ProcedureState::PausePending ||
          state_ == ProcedureState::Paused;
 }
@@ -455,6 +458,19 @@ void failProcedure(FailureCause cause, uint32_t now);
 
 void stopProcedure(bool updateDisplay, uint32_t now) {
   idleOutputs();
+  if (state_ == ProcedureState::Preparing) {
+    cellq::monitor::cancelTestZero();
+    state_ = ProcedureState::Idle;
+    resetCountdowns();
+    if (updateDisplay) {
+      cellq::display::setSquarePauseButton(false);
+      writeAllCountdowns();
+      displayedProgress_ = PROGRESS_NOT_SENT;
+      writeProcedureState();
+    }
+    DBG_SQUARE("STOP");
+    return;
+  }
   if (!cellq::logger::finish(now, cellq::logger::EndReason::Stopped,
                              completedCycles_)) {
     cellq::logger::abort();
@@ -592,6 +608,18 @@ void startProcedure(uint32_t now) {
   writeAllCountdowns();
   writeProcedureState();
   DBG_SQUARE("START");
+}
+
+void prepareProcedureStart(uint32_t now) {
+  if (!presetLoaded_ || !presetValid(activePreset_)) {
+    failProcedure(FailureCause::Preset, now);
+    return;
+  }
+  idleOutputs();
+  cellq::monitor::beginTestZero();
+  state_ = ProcedureState::Preparing;
+  cellq::display::setSquareStartButton(true);
+  DBG_SQUARE("ZERO,START");
 }
 
 void pauseProcedure() {
@@ -814,7 +842,7 @@ void openSquarePage(uint32_t now) {
     cellq::display::setSquarePresetReady(false);
     loadPreset1(now);
   } else {
-    if (procedureActive()) {
+    if (procedureActive() && state_ != ProcedureState::Preparing) {
       refreshRuntimeSnapshot();
     }
     beginPageSync(now);
@@ -893,6 +921,12 @@ void begin() {
 }
 
 void update(uint32_t now) {
+  if (state_ == ProcedureState::Preparing &&
+      monitor::updateTestZero()) {
+    DBG_SQUARE("ZERO,DONE");
+    now = millis();
+    startProcedure(now);
+  }
   if (procedureAdvancing()) {
     refreshRuntimeSnapshot();
     if (waveform::takeFinished()) {
@@ -914,7 +948,7 @@ void update(uint32_t now) {
       }
     }
   }
-  if (procedureActive() &&
+  if (state_ != ProcedureState::Preparing && procedureActive() &&
       !logger::update(now, loggerState(), completedCycles_)) {
     logger::disableAfterFailure();
     if (form2Visible_) {
@@ -1005,7 +1039,7 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
     if (procedureActive()) {
       stopProcedure(true, now);
     } else {
-      startProcedure(now);
+      prepareProcedureStart(now);
     }
     return;
   }
@@ -1020,6 +1054,10 @@ void handleDisplayEvent(const display::Event &event, uint32_t now) {
 
 bool isProcedureActive() {
   return procedureActive();
+}
+
+bool isProcedurePreparing() {
+  return state_ == ProcedureState::Preparing;
 }
 
 bool isProcedureRunning() {

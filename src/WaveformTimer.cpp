@@ -332,6 +332,20 @@ uint32_t durationMinutesForCyclesRoundedUp(uint32_t cycles,
              : static_cast<uint32_t>(roundedMinutes);
 }
 
+bool durationForCyclesUnderOneMinute(uint32_t cycles,
+                                    uint16_t frequencyTenthsHz,
+                                    uint16_t delayMs) {
+  if (cycles == 0U || frequencyTenthsHz == 0U) {
+    return false;
+  }
+  const uint64_t cycleTicks =
+      static_cast<uint64_t>(periodTicksForFrequency(frequencyTenthsHz)) +
+      static_cast<uint32_t>(delayMs) *
+          (TIMER_TICKS_PER_SECOND / 1000UL);
+  return static_cast<uint64_t>(cycles) * cycleTicks <
+         60ULL * TIMER_TICKS_PER_SECOND;
+}
+
 void begin() {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
     TCCR5A = 0;

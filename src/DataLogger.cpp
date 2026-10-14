@@ -153,7 +153,7 @@ bool writeHeader(uint32_t now) {
            static_cast<unsigned int>(preset_.channelEnabled[5]));
   ok = writeLine(line) && ok;
   ok = writeLine(
-           "COLUMNS,TYPE,ELAPSED_MS,STATE,G1_CYCLE,G2_CYCLE,V1,V2,V3,"
+           "TYPE,ELAPSED_MS,STATE,G1_CYCLE,G2_CYCLE,V1,V2,V3,"
            "V4,V5,V6,P1_X10_KPA,P2_X10_KPA,P3_X10_KPA,P4_X10_KPA,"
            "P5_X10_KPA,P6_X10_KPA") &&
        ok;

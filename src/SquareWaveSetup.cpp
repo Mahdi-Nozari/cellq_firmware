@@ -116,13 +116,20 @@ void formatHoursMinutes(char *text, uint32_t totalMinutes) {
   text[position] = '\0';
 }
 
+uint32_t displayedMinutesForCycles(uint8_t group) {
+  const uint32_t minutes =
+      cellq::waveform::durationMinutesForCyclesRoundedUp(
+          draft_.totalCycles[group], draft_.frequencyTenthsHz[group],
+          draft_.delayMs[group]);
+  return minutes > MAXIMUM_TIME_MINUTES ? MAXIMUM_TIME_MINUTES : minutes;
+}
+
 void resetMode() {
   cycleMode_ = false;
   for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT; ++group) {
-    enteredTimeMinutes_[group] = 0U;
+    enteredTimeMinutes_[group] = displayedMinutesForCycles(group);
     selectedTimeField_[group] = TIME_FIELD_MINUTES;
-    timeDerivedFromCycles_[group] = false;
-    draft_.totalCycles[group] = cellq::config::SETUP_DEFAULT_TOTAL_CYCLES;
+    timeDerivedFromCycles_[group] = true;
   }
 }
 
@@ -140,14 +147,6 @@ void updateCyclesFromTime(uint8_t group) {
   draft_.totalCycles[group] = cellq::waveform::cyclesForDurationMinutes(
       enteredTimeMinutes_[group], draft_.frequencyTenthsHz[group],
       draft_.delayMs[group]);
-}
-
-uint32_t displayedMinutesForCycles(uint8_t group) {
-  const uint32_t minutes =
-      cellq::waveform::durationMinutesForCyclesRoundedUp(
-          draft_.totalCycles[group], draft_.frequencyTenthsHz[group],
-          draft_.delayMs[group]);
-  return minutes > MAXIMUM_TIME_MINUTES ? MAXIMUM_TIME_MINUTES : minutes;
 }
 
 void writeParameter(uint8_t group, uint8_t parameter) {
@@ -404,7 +403,14 @@ void setCycleMode(bool cycleMode, uint32_t now) {
     for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT;
          ++group) {
       if (draft_.frequencyTenthsHz[group] != 0U) {
-        enteredTimeMinutes_[group] = displayedMinutesForCycles(group);
+        if (cellq::waveform::durationForCyclesUnderOneMinute(
+                draft_.totalCycles[group], draft_.frequencyTenthsHz[group],
+                draft_.delayMs[group])) {
+          enteredTimeMinutes_[group] = 0U;
+          draft_.totalCycles[group] = 0U;
+        } else {
+          enteredTimeMinutes_[group] = displayedMinutesForCycles(group);
+        }
       }
       selectedTimeField_[group] = TIME_FIELD_MINUTES;
       timeDerivedFromCycles_[group] = true;

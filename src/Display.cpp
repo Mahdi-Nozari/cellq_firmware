@@ -89,20 +89,46 @@ void acceptEvent(uint8_t object, uint8_t index, uint16_t value) {
   queueHead = next;
 }
 
-void retryInFlight() {
+void discardQueuedScopeWrites() {
+  uint8_t kept = 0;
+  uint8_t keptPriority = 0;
+  for (uint8_t index = 0; index < txCount; ++index) {
+    if (txQueue[index].object == cellq::gui::SCOPE_OBJECT) {
+      continue;
+    }
+    txQueue[kept++] = txQueue[index];
+    if (index < priorityTail) {
+      ++keptPriority;
+    }
+  }
+  txCount = kept;
+  priorityTail = keptPriority;
+}
+
+void markMonitorScopeFault() {
+  monitorScopeFault = true;
+  discardQueuedScopeWrites();
+}
+
+void retryInFlight(char reason) {
   if (inFlight.object == cellq::gui::SCOPE_OBJECT) {
-    monitorScopeFault = true;
-    DBG_LCD_DROP(inFlight.command, inFlight.index);
+    markMonitorScopeFault();
+    DBG_LCD_DROP(inFlight.command, inFlight.object, inFlight.index, reason);
     return;
   }
   if (inFlight.retries != 0U ||
       txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE ||
       (eventPriority && txCount != 0U) ||
       (txCount != 0U && txQueue[0].object == cellq::gui::FORM_OBJECT)) {
-    DBG_LCD_DROP(inFlight.command, inFlight.index);
+    const char dropReason =
+        inFlight.retries != 0U ? reason
+        : txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE ? 'Q'
+        : eventPriority && txCount != 0U ? 'P' : 'F';
+    DBG_LCD_DROP(inFlight.command, inFlight.object, inFlight.index,
+                 dropReason);
     return;
   }
-  DBG_LCD_RETRY(inFlight.command, inFlight.index);
+  DBG_LCD_RETRY(inFlight.command, inFlight.object, inFlight.index);
   ++inFlight.retries;
   for (uint8_t index = txCount; index > 0U; --index) {
     txQueue[index] = txQueue[index - 1U];
@@ -143,7 +169,7 @@ void receiveByte(uint8_t byte) {
   } else if (byte == GENIE_NAK) {
     if (waitingForAck) {
       waitingForAck = false;
-      retryInFlight();
+      retryInFlight('N');
     }
   }
 }
@@ -226,19 +252,19 @@ void queueCommand(const TxCommand &item) {
   if (txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE) {
     if (!eventPriority) {
       if (item.object == cellq::gui::SCOPE_OBJECT) {
-        monitorScopeFault = true;
+        markMonitorScopeFault();
       }
-      DBG_LCD_DROP(item.command, item.index);
+      DBG_LCD_DROP(item.command, item.object, item.index, 'Q');
       return;
     }
-    if (txQueue[txCount - 1U].object == cellq::gui::SCOPE_OBJECT) {
-      monitorScopeFault = true;
-    }
-    DBG_LCD_DROP(txQueue[txCount - 1U].command,
-                 txQueue[txCount - 1U].index);
+    const TxCommand dropped = txQueue[txCount - 1U];
+    DBG_LCD_DROP(dropped.command, dropped.object, dropped.index, 'P');
     --txCount;
     if (priorityTail > txCount) {
       priorityTail = txCount;
+    }
+    if (dropped.object == cellq::gui::SCOPE_OBJECT) {
+      markMonitorScopeFault();
     }
   }
   if (eventPriority) {
@@ -268,7 +294,8 @@ void queueLabel(uint8_t index, const char *text) {
   }
   const size_t length = strlen(text);
   if (length > MAX_LABEL_LENGTH) {
-    DBG_LCD_DROP(GENIE_WRITE_INH_LABEL, index);
+    DBG_LCD_DROP(GENIE_WRITE_INH_LABEL, cellq::gui::ILABELB_OBJECT,
+                 index, 'L');
     return;
   }
   TxCommand item = {};
@@ -317,7 +344,7 @@ void service() {
       static_cast<uint32_t>(millis() - commandSentMs) >=
           config::DISPLAY_ACK_TIMEOUT_MS) {
     waitingForAck = false;
-    retryInFlight();
+    retryInFlight('T');
   }
   sendNext();
 }

@@ -12,6 +12,9 @@ struct PressureSample {
 };
 
 void begin();
+void beginTestZero();
+bool updateTestZero();
+void cancelTestZero();
 void acquire(uint32_t now);
 void update(uint32_t now);
 void handleDisplayEvent(const display::Event &event, uint32_t now);

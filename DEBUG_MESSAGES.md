@@ -10,12 +10,14 @@ This guide describes the USB serial debug messages currently produced by the Cel
 - Debug switch: `CELLQ_DEBUG` at the top of `include/BuildConfig.h`
 - DAC acknowledgment policy: `CELLQ_REQUIRE_DAC_ACK` immediately below it
 - Monitor sensor source: `CELLQ_VIRTUAL_PRESSURE_SENSORS` in `include/BuildConfig.h`
+- Monitor scope test flag: `CELLQ_MONITOR_SCOPES_ENABLED` in `include/BuildConfig.h`
 - Factory preset source: `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` in `include/BuildConfig.h`
 
 ```cpp
 #define CELLQ_DEBUG 1
 #define CELLQ_REQUIRE_DAC_ACK 0
 #define CELLQ_VIRTUAL_PRESSURE_SENSORS 0
+#define CELLQ_MONITOR_SCOPES_ENABLED 1
 #define CELLQ_LOAD_FACTORY_PRESET_FROM_SD 1
 ```
 
@@ -24,6 +26,8 @@ Use `1` to enable messages. Use `0` to compile out the debug calls and their tex
 For `CELLQ_REQUIRE_DAC_ACK`, use `0` during display-only bench testing so the Square-wave procedure can run without physical DACs. Set it to `1` when the DACs are installed so a missing acknowledgment changes the procedure to ERROR. The firmware attempts the I2C writes in both modes.
 
 Set `CELLQ_VIRTUAL_PRESSURE_SENSORS` to `1` for display-only testing. Set it to `0` when the six physical sensors are connected.
+
+Set `CELLQ_MONITOR_SCOPES_ENABLED` to `0` for a comparison test without Form 3 scope writes. Pressure acquisition, labels, leakage indication, and SD logging remain active. Restore it to `1` for normal scope operation. No Workshop change is needed for this test.
 
 Set `CELLQ_LOAD_FACTORY_PRESET_FROM_SD` to `1` to use valid `/PRESETS/FCTRY1.CSV` and `/PRESETS/FCTRY2.CSV` mirrors. Set it to `0` to always use both compiled factory presets. A failed factory SD load also falls back automatically.
 
@@ -36,8 +40,8 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,BOOT,OK` | Firmware setup completed. |
 | `D,E,<cmd>,<object>,<index>,<value>` | A raw event was received from the display. |
 | `D,E,DROP` | The display event queue was full, so an event was discarded. |
-| `D,LCD,RETRY,<command>,<index>` | The display did not acknowledge a command within 250 ms, or returned NAK. Firmware queued one retry. Command `1` is an object/image/switch write; `12` is a label write. |
-| `D,LCD,DROP,<command>,<index>` | A display command was discarded after a failed retry, because newer navigation took priority, because the transmit queue filled, or because label text exceeded 20 characters. Repeated messages indicate a communication problem; report any missing label. |
+| `D,LCD,RETRY,<command>,<object>,<index>` | The display did not acknowledge a command within 250 ms, or returned NAK. Firmware queued one retry. Command `1` is an object/image/switch write; `12` is a label write. |
+| `D,LCD,DROP,<command>,<object>,<index>,<reason>` | A display command was discarded. The object type distinguishes Scope (`25`) from UserImages (`27`) and other objects that share the same index. See reason codes below. |
 | `D,P,<regulator>,<tenths>` | A manual pressure setting changed. |
 | `D,DAC,<regulator>,<code>,<result>` | An MCP4725 command was attempted. |
 | `D,T,<channel>,<seconds>` | A manual hour, minute, or second field changed; the value is the resulting combined duration in seconds. |
@@ -48,6 +52,7 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,MON,P,<channel>,<tenths>` | A Form 3 channel-pressure value was sent to its LCD label. |
 | `D,MON,SRC,VIRTUAL` | The active test is using generated pressure values and does not read A8-A13. |
 | `D,MON,SRC,ANALOG` | The active test is sampling the physical A8-A13 inputs. Acquisition runs even when Form 3 is hidden; this message appears only when its stream starts. |
+| `D,MON,SCOPE,OFF` | A scope write failed. Further scope samples are suppressed for this Form 3 visit; pressure labels, status images, and controls continue. Leave and re-enter Form 3 to try the scopes again. |
 | `D,MON,Z,<channel>,<adc>` | A physical sensor's averaged startup ADC value was stored as its 0 kPa reference. |
 | `D,SD,OK` | SD card initialization on D10 succeeded at boot. |
 | `D,SD,FAIL` | SD card initialization failed; both compiled factory presets remain available. |
@@ -94,6 +99,7 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,SELECT,BACK` | Form 7 Back returned to its opening page without changing the selected preset. |
 | `D,SW,READY` | Both Form 2 field-refresh passes completed, and UserImages13 was commanded to image 1. |
 | `D,SW,START` | The Square-wave procedure started. |
+| `D,SW,ZERO,START` / `D,SW,ZERO,DONE` | Pre-test sensor zeroing began/completed. Physical sensors are read before regulator pressure is applied, logging starts, or valves cycle; virtual-sensor builds complete immediately. A Stop before DONE cancels the preparation. |
 | `D,SW,PAUSE,WAIT` | ISwitch7 was ON, so a cycle-boundary pause was requested. Each unfinished group is still completing its current cycle and UserImages12 remains at running image 1. |
 | `D,SW,PAUSE` | The Square-wave procedure is fully paused and UserImages12 uses image 4. With immediate pause, valve phases are preserved; with cycle-boundary pause, both groups are OFF at their boundaries. Regulators remain active. |
 | `D,SW,RESUME` | The paused Square-wave procedure resumed. |
@@ -106,6 +112,19 @@ Debug output is best-effort. A message is skipped when there is not enough room 
 | `D,SW,ERR,LOG` | A log finalization also failed while another fatal error was already stopping the procedure. Ordinary logging failures now report WARN and do not stop it. |
 
 All regulator and channel numbers in the action messages are human-readable and start at `1`.
+
+### LCD drop reasons
+
+| Reason | Meaning |
+|---|---|
+| `T` | No ACK arrived within 250 ms. |
+| `N` | The display returned NAK. |
+| `Q` | The transmit queue was full. |
+| `P` | A command was evicted or could not be retried because a touch-triggered command had priority. |
+| `F` | A pending form activation prevented a retry. |
+| `L` | Label text exceeded the 20-character limit. |
+
+For example, `D,LCD,DROP,1,25,1,T` identifies a Scope1 object write lost to an ACK timeout. By contrast, `D,LCD,DROP,1,27,1,T` identifies UserImages1. Scope writes are not retried because an uncertain write could shift the three-trace sequence.
 
 ### Preset error codes
 
@@ -305,9 +324,9 @@ Example:
 D,MON,P,2,-21
 ```
 
-This means channel 2's newest qualified reading for the current valve phase was `-2.1 kPa` and was sent to ILabelB9. A valve output change invalidates the previous qualified reading, so this value is not reused from an earlier cycle. Messages occur only when a changed label is sent, at less than 4 updates per second per channel; unchanged readings are suppressed. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error. The underlying 100 Hz acquisition still runs for the active test, independently of Form 3.
+This means channel 2's two-second average of qualifying valve-ON samples was `-2.1 kPa` and was sent to ILabelB9. The six enabled-channel label attempts are staggered by about 334 ms, with each channel updated at most once per two seconds. A window without at least five eligible samples keeps the last valid value, or initially shows `---`. Pressure labels, scope samples, and these messages are produced only while Form 3 is visible and the procedure is Running or PausePending. They stop while fully Paused and after the procedure becomes Idle, Done, or Error. The underlying 100 Hz acquisition still runs for the active test, independently of Form 3. A scope failure stops only further scope samples for that Form 3 visit; labels continue.
 
-All channels are Honeywell 015PDAA5 sensors and use the same 0.5-4.5 V, +/-15 psi slope with the default 5 V ADC reference. In physical-sensor mode, firmware averages 64 readings for each channel at boot and stores that average as its per-boot 0 kPa reference. The resulting values are measurements only; they are not currently used for feedback control or a safety interlock.
+All channels are Honeywell 015PDAA5 sensors and use the same 0.5-4.5 V, +/-15 psi slope with the default 5 V ADC reference. In physical-sensor mode, firmware averages 64 readings for each channel at boot and again just before each Square-wave test; the latest complete average is its 0 kPa reference. The resulting values are measurements only; they are not currently used for feedback control or a safety interlock.
 
 Startup zeroing reports one line per channel, for example:
 

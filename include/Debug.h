@@ -36,23 +36,36 @@
     }                                                                         \
   } while (0)
 
-#define DBG_LCD_RETRY(c, i)                                                   \
+#define DBG_LCD_RETRY(c, o, i)                                                \
   do {                                                                        \
-    if (Serial.availableForWrite() >= 28) {                                   \
+    if (Serial.availableForWrite() >= 32) {                                   \
       Serial.print(F("D,LCD,RETRY,"));                                        \
       Serial.print(c);                                                        \
+      Serial.print(',');                                                      \
+      Serial.print(o);                                                        \
       Serial.print(',');                                                      \
       Serial.println(i);                                                      \
     }                                                                         \
   } while (0)
 
-#define DBG_LCD_DROP(c, i)                                                    \
+#define DBG_LCD_DROP(c, o, i, reason)                                         \
   do {                                                                        \
-    if (Serial.availableForWrite() >= 28) {                                   \
+    if (Serial.availableForWrite() >= 32) {                                   \
       Serial.print(F("D,LCD,DROP,"));                                         \
       Serial.print(c);                                                        \
       Serial.print(',');                                                      \
-      Serial.println(i);                                                      \
+      Serial.print(o);                                                        \
+      Serial.print(',');                                                      \
+      Serial.print(i);                                                        \
+      Serial.print(',');                                                      \
+      Serial.println(reason);                                                 \
+    }                                                                         \
+  } while (0)
+
+#define DBG_MONITOR_SCOPE_STOP()                                              \
+  do {                                                                        \
+    if (Serial.availableForWrite() >= 18) {                                   \
+      Serial.println(F("D,MON,SCOPE,OFF"));                                  \
     }                                                                         \
   } while (0)
 
@@ -256,8 +269,9 @@
 #define DBG_BOOT() do { } while (0)
 #define DBG_EVENT(c, o, i, v) do { } while (0)
 #define DBG_EVENT_DROP() do { } while (0)
-#define DBG_LCD_RETRY(c, i) do { } while (0)
-#define DBG_LCD_DROP(c, i) do { } while (0)
+#define DBG_LCD_RETRY(c, o, i) do { } while (0)
+#define DBG_LCD_DROP(c, o, i, reason) do { } while (0)
+#define DBG_MONITOR_SCOPE_STOP() do { } while (0)
 #define DBG_PRESSURE(r, v) do { } while (0)
 #define DBG_DAC(r, c, o) do { } while (0)
 #define DBG_TIME(c, v) do { } while (0)

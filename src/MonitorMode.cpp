@@ -78,9 +78,7 @@ uint8_t labelChannel_ = 0;
 uint32_t lastDisplayWriteMs_ = 0;
 uint32_t lastScopeWriteMs_ = 0;
 uint32_t nextLabelWriteMs_ = 0;
-bool scopeResyncPending_ = false;
-bool scopeReloadQueued_ = false;
-bool scopeRecoveryAttempted_ = false;
+bool scopeDisabledForVisit_ = false;
 
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
 static_assert(cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT > 0U,
@@ -89,6 +87,11 @@ static_assert(cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT <= 64U,
               "Pressure zero sample count exceeds fixed-point range");
 
 uint32_t zeroAdcSum_[cellq::hw::CHANNEL_COUNT] = {};
+uint32_t pendingZeroAdcSum_[cellq::hw::CHANNEL_COUNT] = {};
+uint8_t zeroChannel_ = 0;
+uint8_t zeroSampleCount_ = 0;
+bool testZeroActive_ = false;
+constexpr uint8_t TEST_ZERO_READS_PER_UPDATE = 4U;
 
 int32_t divideRounded(int32_t value, int32_t divisor) {
   if (value >= 0) {
@@ -132,7 +135,7 @@ int16_t readPressureTenths(uint8_t channel, bool valveOn) {
   (void)valveOn;
   const uint16_t raw = readPressureAdc(channel);
 
-  // Honeywell 015PDAA5 slope with the per-channel boot zero removed.
+  // Honeywell 015PDAA5 slope with the current per-channel zero removed.
   const int32_t centered =
       static_cast<int32_t>(raw) *
           cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT -
@@ -238,18 +241,13 @@ void startStream(uint32_t now) {
 void deactivate() {
   formVisible_ = false;
   stopStream();
-  scopeResyncPending_ = false;
-  scopeReloadQueued_ = false;
-  scopeRecoveryAttempted_ = false;
 }
 
 void activate(uint32_t now) {
-  scopeRecoveryAttempted_ = scopeReloadQueued_;
   formVisible_ = true;
   streamActive_ = false;
   scopeChannel_ = 0;
-  scopeResyncPending_ = false;
-  scopeReloadQueued_ = false;
+  scopeDisabledForVisit_ = false;
   cellq::display::takeMonitorScopeFault();
   displayedTestState_ = UINT8_MAX;
   displayedPageStatus_ = UINT8_MAX;
@@ -349,19 +347,63 @@ void begin() {
   statusSyncChannel_ = hw::CHANNEL_COUNT;
   leakSyncChannel_ = hw::CHANNEL_COUNT;
   scopeChannel_ = 0;
-  scopeResyncPending_ = false;
-  scopeReloadQueued_ = false;
-  scopeRecoveryAttempted_ = false;
+  scopeDisabledForVisit_ = false;
   sampleValid_ = false;
   acquisitionActive_ = false;
   resetLeakDetection();
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
+  testZeroActive_ = false;
   calibratePressureZeros();
 #endif
 }
 
+void beginTestZero() {
+#if !CELLQ_VIRTUAL_PRESSURE_SENSORS
+  zeroChannel_ = 0;
+  zeroSampleCount_ = 0;
+  testZeroActive_ = true;
+  for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
+    pendingZeroAdcSum_[channel] = 0;
+  }
+#endif
+}
+
+bool updateTestZero() {
+#if CELLQ_VIRTUAL_PRESSURE_SENSORS
+  return true;
+#else
+  if (!testZeroActive_) {
+    return false;
+  }
+  for (uint8_t read = 0; read < TEST_ZERO_READS_PER_UPDATE; ++read) {
+    if (zeroSampleCount_ == 0U) {
+      analogRead(hw::PRESSURE_PINS[zeroChannel_]);
+    }
+    pendingZeroAdcSum_[zeroChannel_] +=
+        analogRead(hw::PRESSURE_PINS[zeroChannel_]);
+    if (++zeroSampleCount_ == config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT) {
+      zeroSampleCount_ = 0;
+      if (++zeroChannel_ == hw::CHANNEL_COUNT) {
+        for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
+          zeroAdcSum_[channel] = pendingZeroAdcSum_[channel];
+        }
+        testZeroActive_ = false;
+        return true;
+      }
+    }
+  }
+  return false;
+#endif
+}
+
+void cancelTestZero() {
+#if !CELLQ_VIRTUAL_PRESSURE_SENSORS
+  testZeroActive_ = false;
+#endif
+}
+
 void acquire(uint32_t now) {
-  if (!square::isProcedureActive()) {
+  if (!square::isProcedureActive() || square::isProcedurePreparing()) {
     acquisitionActive_ = false;
     sampleValid_ = false;
     if (leakWindowActive_) {
@@ -456,16 +498,9 @@ void update(uint32_t now) {
   if (!formVisible_) {
     return;
   }
-  if (display::takeMonitorScopeFault()) {
-    stopStream();
-    scopeResyncPending_ = true;
-  }
-  if (scopeResyncPending_) {
-    if (!scopeRecoveryAttempted_ && !scopeReloadQueued_) {
-      scopeReloadQueued_ = true;
-      display::activateForm(gui::MONITOR_FORM);
-    }
-    return;
+  if (display::takeMonitorScopeFault() && !scopeDisabledForVisit_) {
+    scopeDisabledForVisit_ = true;
+    DBG_MONITOR_SCOPE_STOP();
   }
   refreshStatusState();
   if (!square::isProcedureRunning()) {
@@ -521,7 +556,8 @@ void update(uint32_t now) {
   if (static_cast<int32_t>(now - nextLabelWriteMs_) >= 0) {
     wrote = writeNextLabel(now);
   }
-  if (!wrote && sampleValid_ &&
+  if (!wrote && CELLQ_MONITOR_SCOPES_ENABLED &&
+      !scopeDisabledForVisit_ && sampleValid_ &&
       static_cast<uint32_t>(now - lastScopeWriteMs_) >=
           SCOPE_CHANNEL_INTERVAL_MS &&
       display::monitorQueueHasRoom()) {

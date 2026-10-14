@@ -23,6 +23,9 @@ uint32_t cyclesForDurationMinutes(uint32_t minutes,
 uint32_t durationMinutesForCyclesRoundedUp(uint32_t cycles,
                                            uint16_t frequencyTenthsHz,
                                            uint16_t delayMs);
+bool durationForCyclesUnderOneMinute(uint32_t cycles,
+                                    uint16_t frequencyTenthsHz,
+                                    uint16_t delayMs);
 void stop();
 void pause();
 void pauseAtCycleBoundary();
