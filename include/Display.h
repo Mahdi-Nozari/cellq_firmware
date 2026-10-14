@@ -28,6 +28,7 @@ void setMonitorPressureLabel(uint8_t channel, int16_t tenths);
 void setMonitorPressureUnavailable(uint8_t channel);
 void addMonitorScopeSample(uint8_t channel, uint16_t value);
 bool monitorQueueHasRoom();
+bool takeMonitorScopeFault();
 void setSquareLabel(uint8_t index, const char *text);
 void setSquareChannelEnabled(uint8_t channel, bool enabled);
 void setSquareStatus(uint8_t image);

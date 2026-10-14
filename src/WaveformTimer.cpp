@@ -312,6 +312,26 @@ uint32_t cyclesForDurationMinutes(uint32_t minutes,
                              : static_cast<uint32_t>(cycles);
 }
 
+uint32_t durationMinutesForCyclesRoundedUp(uint32_t cycles,
+                                           uint16_t frequencyTenthsHz,
+                                           uint16_t delayMs) {
+  if (cycles == 0U || frequencyTenthsHz == 0U) {
+    return 0U;
+  }
+  const uint64_t cycleTicks =
+      static_cast<uint64_t>(periodTicksForFrequency(frequencyTenthsHz)) +
+      static_cast<uint32_t>(delayMs) *
+          (TIMER_TICKS_PER_SECOND / 1000UL);
+  const uint64_t totalTicks = static_cast<uint64_t>(cycles) * cycleTicks;
+  const uint64_t minuteTicks = 60ULL * TIMER_TICKS_PER_SECOND;
+  const uint64_t wholeMinutes = totalTicks / minuteTicks;
+  const uint64_t roundedMinutes =
+      wholeMinutes + (totalTicks % minuteTicks != 0U ? 1U : 0U);
+  return roundedMinutes > UINT32_MAX
+             ? UINT32_MAX
+             : static_cast<uint32_t>(roundedMinutes);
+}
+
 void begin() {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
     TCCR5A = 0;
@@ -596,6 +616,31 @@ uint16_t outputRevision(uint8_t group) {
     revision = outputRevision_[group];
   }
   return revision;
+}
+
+bool onPhaseHasRemainingMargin(uint8_t group, uint16_t marginMs) {
+  if (group >= GROUP_COUNT) {
+    return false;
+  }
+  bool enoughTime = false;
+  const uint32_t marginTicks =
+      static_cast<uint32_t>(marginMs) *
+      (TIMER_TICKS_PER_SECOND / 1000UL);
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    if (active_ && !paused_ && !groupFinished_[group] &&
+        phase_[group] == Phase::On && groupOutputOn_[group]) {
+      uint32_t elapsedTicks = 0;
+      if (scheduledTicks_ != 0U) {
+        elapsedTicks = TCNT5;
+        if ((TIFR5 & _BV(OCF5A)) != 0U ||
+            elapsedTicks > scheduledTicks_) {
+          elapsedTicks = scheduledTicks_;
+        }
+      }
+      enoughTime = ticksToEvent_[group] > elapsedTicks + marginTicks;
+    }
+  }
+  return enoughTime;
 }
 }
 }

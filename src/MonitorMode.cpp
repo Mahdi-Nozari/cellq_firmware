@@ -19,7 +19,8 @@ constexpr uint16_t SCOPE_CHANNEL_INTERVAL_MS =
      cellq::hw::CHANNEL_COUNT - 1U) /
     cellq::hw::CHANNEL_COUNT;
 constexpr uint16_t LABEL_CHANNEL_INTERVAL_MS =
-    cellq::config::MONITOR_LABEL_UPDATE_INTERVAL_MS /
+    (cellq::config::MONITOR_LABEL_UPDATE_INTERVAL_MS +
+     cellq::hw::CHANNEL_COUNT - 1U) /
     cellq::hw::CHANNEL_COUNT;
 
 static_assert(SCOPE_CHANNEL_INTERVAL_MS > 0,
@@ -36,6 +37,8 @@ static_assert(cellq::config::MONITOR_LEAK_THRESHOLD_PERCENT > 0U &&
               "Leak detection requires a threshold and samples");
 static_assert(LABEL_CHANNEL_INTERVAL_MS > 0,
               "Monitor label interval is too short");
+static_assert(cellq::config::MONITOR_LABEL_MIN_ON_SAMPLES > 0U,
+              "Monitor label averaging requires samples");
 static_assert(cellq::gui::MONITOR_SCOPE_TRACES *
                       cellq::hw::REGULATOR_COUNT ==
                   cellq::hw::CHANNEL_COUNT,
@@ -51,11 +54,9 @@ bool acquisitionActive_ = false;
 uint32_t lastAcquisitionMs_ = 0;
 uint16_t seenRevision_[cellq::hw::REGULATOR_COUNT] = {};
 uint32_t phaseStartMs_[cellq::hw::REGULATOR_COUNT] = {};
-int16_t settledPressure_[cellq::hw::CHANNEL_COUNT] = {};
-uint8_t settledPhase_[cellq::hw::CHANNEL_COUNT] = {};
-bool settledValid_[cellq::hw::CHANNEL_COUNT] = {};
-int16_t displayedPressure_[cellq::hw::CHANNEL_COUNT] = {};
-bool displayedValveOn_[cellq::hw::CHANNEL_COUNT] = {};
+int32_t labelPressureSum_[cellq::hw::CHANNEL_COUNT] = {};
+uint16_t labelSampleCount_[cellq::hw::CHANNEL_COUNT] = {};
+uint32_t labelWindowStartMs_[cellq::hw::CHANNEL_COUNT] = {};
 bool displayedPressureValid_[cellq::hw::CHANNEL_COUNT] = {};
 bool displayedUnavailable_[cellq::hw::CHANNEL_COUNT] = {};
 int32_t leakPressureSum_[cellq::hw::CHANNEL_COUNT] = {};
@@ -71,21 +72,15 @@ uint8_t displayedTestState_ = UINT8_MAX;
 uint8_t displayedPageStatus_ = UINT8_MAX;
 bool loadingStatusPending_ = false;
 uint8_t statusSyncChannel_ = cellq::hw::CHANNEL_COUNT;
-// Preserve the next trace across stream stops; each scope advances per write.
+// Preserve trace order across pauses; restart at channel 1 on form entry.
 uint8_t scopeChannel_ = 0;
 uint8_t labelChannel_ = 0;
 uint32_t lastDisplayWriteMs_ = 0;
 uint32_t lastScopeWriteMs_ = 0;
-uint32_t lastLabelWriteMs_ = 0;
-
-void invalidateSettledGroup(uint8_t group) {
-  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT;
-       ++channel) {
-    if (cellq::hw::CHANNEL_TO_REGULATOR[channel] == group) {
-      settledValid_[channel] = false;
-    }
-  }
-}
+uint32_t nextLabelWriteMs_ = 0;
+bool scopeResyncPending_ = false;
+bool scopeReloadQueued_ = false;
+bool scopeRecoveryAttempted_ = false;
 
 #if !CELLQ_VIRTUAL_PRESSURE_SENSORS
 static_assert(cellq::config::PRESSURE_SENSOR_ZERO_SAMPLE_COUNT > 0U,
@@ -223,7 +218,16 @@ void startStream(uint32_t now) {
   streamActive_ = true;
   labelChannel_ = 0;
   lastScopeWriteMs_ = now - SCOPE_CHANNEL_INTERVAL_MS;
-  lastLabelWriteMs_ = now - LABEL_CHANNEL_INTERVAL_MS;
+  nextLabelWriteMs_ =
+      now + cellq::config::MONITOR_LABEL_UPDATE_INTERVAL_MS;
+  for (uint8_t channel = 0; channel < cellq::hw::CHANNEL_COUNT;
+       ++channel) {
+    labelPressureSum_[channel] = 0;
+    labelSampleCount_[channel] = 0;
+    labelWindowStartMs_[channel] =
+        now + static_cast<uint32_t>(channel) *
+                  LABEL_CHANNEL_INTERVAL_MS;
+  }
 #if CELLQ_VIRTUAL_PRESSURE_SENSORS
   DBG_MONITOR_SOURCE("VIRTUAL");
 #else
@@ -234,11 +238,19 @@ void startStream(uint32_t now) {
 void deactivate() {
   formVisible_ = false;
   stopStream();
+  scopeResyncPending_ = false;
+  scopeReloadQueued_ = false;
+  scopeRecoveryAttempted_ = false;
 }
 
 void activate(uint32_t now) {
+  scopeRecoveryAttempted_ = scopeReloadQueued_;
   formVisible_ = true;
   streamActive_ = false;
+  scopeChannel_ = 0;
+  scopeResyncPending_ = false;
+  scopeReloadQueued_ = false;
+  cellq::display::takeMonitorScopeFault();
   displayedTestState_ = UINT8_MAX;
   displayedPageStatus_ = UINT8_MAX;
   loadingStatusPending_ = true;
@@ -293,16 +305,16 @@ void writeNextScope(uint32_t now) {
 bool writeNextLabel(uint32_t now) {
   const uint8_t channel = labelChannel_;
   labelChannel_ = (labelChannel_ + 1U) % cellq::hw::CHANNEL_COUNT;
-  lastLabelWriteMs_ = now;
-  if (!sampleValid_) {
+  nextLabelWriteMs_ = now + LABEL_CHANNEL_INTERVAL_MS;
+  const uint16_t count = labelSampleCount_[channel];
+  const int32_t sum = labelPressureSum_[channel];
+  labelPressureSum_[channel] = 0;
+  labelSampleCount_[channel] = 0;
+  labelWindowStartMs_[channel] = now;
+  if (!cellq::square::isChannelEnabled(channel)) {
     return false;
   }
-  const uint8_t phase = latest_.valveOn[channel];
-  const uint8_t group =
-      cellq::hw::CHANNEL_TO_REGULATOR[channel];
-  if (!settledValid_[channel] ||
-      settledPhase_[channel] != phase ||
-      cellq::waveform::outputRevision(group) != seenRevision_[group]) {
+  if (count < cellq::config::MONITOR_LABEL_MIN_ON_SAMPLES) {
     if (!displayedPressureValid_[channel] &&
         !displayedUnavailable_[channel] &&
         cellq::display::monitorQueueHasRoom()) {
@@ -312,19 +324,14 @@ bool writeNextLabel(uint32_t now) {
     }
     return false;
   }
-  const int16_t pressure = settledPressure_[channel];
-  if (displayedPressureValid_[channel] &&
-      displayedPressure_[channel] == pressure &&
-      displayedValveOn_[channel] == phase) {
-    return false;
-  }
   if (!cellq::display::monitorQueueHasRoom()) {
     return false;
   }
+  const int32_t halfCount = count / 2U;
+  const int16_t pressure = static_cast<int16_t>(
+      (sum >= 0 ? sum + halfCount : sum - halfCount) / count);
   cellq::display::setMonitorPressureLabel(channel, pressure);
   DBG_MONITOR_PRESSURE(channel + 1U, pressure);
-  displayedPressure_[channel] = pressure;
-  displayedValveOn_[channel] = phase;
   displayedPressureValid_[channel] = true;
   displayedUnavailable_[channel] = false;
   return true;
@@ -342,6 +349,9 @@ void begin() {
   statusSyncChannel_ = hw::CHANNEL_COUNT;
   leakSyncChannel_ = hw::CHANNEL_COUNT;
   scopeChannel_ = 0;
+  scopeResyncPending_ = false;
+  scopeReloadQueued_ = false;
+  scopeRecoveryAttempted_ = false;
   sampleValid_ = false;
   acquisitionActive_ = false;
   resetLeakDetection();
@@ -367,9 +377,6 @@ void acquire(uint32_t now) {
     acquisitionActive_ = true;
     lastAcquisitionMs_ =
         now - config::PRESSURE_ACQUISITION_INTERVAL_MS;
-    for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
-      settledValid_[channel] = false;
-    }
   }
   const uint32_t elapsed = now - lastAcquisitionMs_;
   if (elapsed < config::PRESSURE_ACQUISITION_INTERVAL_MS) {
@@ -384,7 +391,6 @@ void acquire(uint32_t now) {
     if (!sampleValid_ || before[group] != seenRevision_[group]) {
       seenRevision_[group] = before[group];
       phaseStartMs_[group] = now;
-      invalidateSettledGroup(group);
     }
   }
   latest_.timeMs = now;
@@ -400,21 +406,33 @@ void acquire(uint32_t now) {
     if (after != before[group]) {
       seenRevision_[group] = after;
       phaseStartMs_[group] = now;
-      invalidateSettledGroup(group);
       continue;
     }
     if (static_cast<uint32_t>(now - phaseStartMs_[group]) <
         config::MONITOR_LABEL_SETTLE_MS) {
       continue;
     }
+    const bool labelSampleEligible =
+        formVisible_ && streamActive_ && square::isProcedureRunning() &&
+        waveform::onPhaseHasRemainingMargin(
+            group, config::MONITOR_LABEL_PRE_CLOSE_MS);
     for (uint8_t channel = 0; channel < hw::CHANNEL_COUNT; ++channel) {
       if (hw::CHANNEL_TO_REGULATOR[channel] != group) {
         continue;
       }
       const uint8_t phase = latest_.valveOn[channel];
-      settledPressure_[channel] = latest_.pressureTenths[channel];
-      settledPhase_[channel] = phase;
-      settledValid_[channel] = true;
+      if (labelSampleEligible && phase != 0U &&
+          square::isChannelEnabled(channel)) {
+        const int32_t windowAge =
+            static_cast<int32_t>(now - labelWindowStartMs_[channel]);
+        if (windowAge >= 0 &&
+            static_cast<uint32_t>(windowAge) <
+                config::MONITOR_LABEL_UPDATE_INTERVAL_MS &&
+            labelSampleCount_[channel] < UINT16_MAX) {
+          labelPressureSum_[channel] += latest_.pressureTenths[channel];
+          ++labelSampleCount_[channel];
+        }
+      }
       if (square::isProcedureRunning() && phase != 0U &&
           square::isChannelEnabled(channel) &&
           square::channelPressureTenths(channel) < 0 &&
@@ -436,6 +454,17 @@ void update(uint32_t now) {
     evaluateLeakDetection(now);
   }
   if (!formVisible_) {
+    return;
+  }
+  if (display::takeMonitorScopeFault()) {
+    stopStream();
+    scopeResyncPending_ = true;
+  }
+  if (scopeResyncPending_) {
+    if (!scopeRecoveryAttempted_ && !scopeReloadQueued_) {
+      scopeReloadQueued_ = true;
+      display::activateForm(gui::MONITOR_FORM);
+    }
     return;
   }
   refreshStatusState();
@@ -489,8 +518,7 @@ void update(uint32_t now) {
     return;
   }
   bool wrote = false;
-  if (static_cast<uint32_t>(now - lastLabelWriteMs_) >=
-      LABEL_CHANNEL_INTERVAL_MS) {
+  if (static_cast<int32_t>(now - nextLabelWriteMs_) >= 0) {
     wrote = writeNextLabel(now);
   }
   if (!wrote && sampleValid_ &&

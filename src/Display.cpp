@@ -34,6 +34,7 @@ uint32_t commandSentMs = 0;
 uint32_t lastFrameByteMs = 0;
 bool waitingForAck = false;
 bool eventPriority = false;
+bool monitorScopeFault = false;
 
 static_assert(cellq::gui::PRESET_SELECT_NAME_LABEL_LAST -
                       cellq::gui::PRESET_SELECT_NAME_LABEL_FIRST +
@@ -89,6 +90,11 @@ void acceptEvent(uint8_t object, uint8_t index, uint16_t value) {
 }
 
 void retryInFlight() {
+  if (inFlight.object == cellq::gui::SCOPE_OBJECT) {
+    monitorScopeFault = true;
+    DBG_LCD_DROP(inFlight.command, inFlight.index);
+    return;
+  }
   if (inFlight.retries != 0U ||
       txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE ||
       (eventPriority && txCount != 0U) ||
@@ -219,8 +225,14 @@ void queueCommand(const TxCommand &item) {
   }
   if (txCount >= cellq::config::DISPLAY_TX_QUEUE_SIZE) {
     if (!eventPriority) {
+      if (item.object == cellq::gui::SCOPE_OBJECT) {
+        monitorScopeFault = true;
+      }
       DBG_LCD_DROP(item.command, item.index);
       return;
+    }
+    if (txQueue[txCount - 1U].object == cellq::gui::SCOPE_OBJECT) {
+      monitorScopeFault = true;
     }
     DBG_LCD_DROP(txQueue[txCount - 1U].command,
                  txQueue[txCount - 1U].index);
@@ -278,6 +290,7 @@ void begin() {
   rxFrameLength = 0;
   expectedForm = NO_EXPECTED_FORM;
   waitingForAck = false;
+  monitorScopeFault = false;
   Serial1.begin(config::DISPLAY_BAUD);
   pinMode(hw::DISPLAY_RESET_PIN, OUTPUT);
   digitalWrite(hw::DISPLAY_RESET_PIN, HIGH);
@@ -437,6 +450,12 @@ void addMonitorScopeSample(uint8_t channel, uint16_t value) {
 bool monitorQueueHasRoom() {
   return !eventPriority && txCount < 4U &&
          (txCount == 0U || txQueue[0].object != gui::FORM_OBJECT);
+}
+
+bool takeMonitorScopeFault() {
+  const bool fault = monitorScopeFault;
+  monitorScopeFault = false;
+  return fault;
 }
 
 void setSquareLabel(uint8_t index, const char *text) {

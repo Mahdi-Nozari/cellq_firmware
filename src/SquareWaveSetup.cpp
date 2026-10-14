@@ -23,6 +23,8 @@ constexpr uint8_t UNKNOWN_FORM = 0xFFU;
 constexpr uint8_t TIME_FIELD_MINUTES = 0U;
 constexpr uint8_t TIME_FIELD_HOURS = 1U;
 constexpr uint8_t TIME_FIELD_HIDDEN = 2U;
+constexpr uint32_t MAXIMUM_TIME_MINUTES =
+    static_cast<uint32_t>(cellq::config::SETUP_TIME_MAX_HOURS) * 60UL + 59UL;
 static_assert(cellq::config::SETUP_TIME_STEP_MINUTES > 0U &&
                   cellq::config::SETUP_TIME_STEP_MINUTES < 60U,
               "Time minute step must be between 1 and 59");
@@ -48,6 +50,7 @@ uint8_t nameLength_ = 0;
 bool cycleMode_ = false;
 uint32_t enteredTimeMinutes_[cellq::hw::REGULATOR_COUNT] = {};
 uint8_t selectedTimeField_[cellq::hw::REGULATOR_COUNT] = {};
+bool timeDerivedFromCycles_[cellq::hw::REGULATOR_COUNT] = {};
 
 uint8_t appendUnsigned(char *text, uint32_t value) {
   char reverse[10];
@@ -118,19 +121,33 @@ void resetMode() {
   for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT; ++group) {
     enteredTimeMinutes_[group] = 0U;
     selectedTimeField_[group] = TIME_FIELD_MINUTES;
+    timeDerivedFromCycles_[group] = false;
     draft_.totalCycles[group] = cellq::config::SETUP_DEFAULT_TOTAL_CYCLES;
   }
 }
 
 void writeTimeFieldImage(uint8_t group) {
   cellq::display::setSquareSetupTimeFieldImage(
-      group, cycleMode_ ? TIME_FIELD_HIDDEN : selectedTimeField_[group]);
+      group, cycleMode_ || draft_.frequencyTenthsHz[group] == 0U
+                 ? TIME_FIELD_HIDDEN
+                 : selectedTimeField_[group]);
 }
 
 void updateCyclesFromTime(uint8_t group) {
+  if (draft_.frequencyTenthsHz[group] == 0U) {
+    return;
+  }
   draft_.totalCycles[group] = cellq::waveform::cyclesForDurationMinutes(
       enteredTimeMinutes_[group], draft_.frequencyTenthsHz[group],
       draft_.delayMs[group]);
+}
+
+uint32_t displayedMinutesForCycles(uint8_t group) {
+  const uint32_t minutes =
+      cellq::waveform::durationMinutesForCyclesRoundedUp(
+          draft_.totalCycles[group], draft_.frequencyTenthsHz[group],
+          draft_.delayMs[group]);
+  return minutes > MAXIMUM_TIME_MINUTES ? MAXIMUM_TIME_MINUTES : minutes;
 }
 
 void writeParameter(uint8_t group, uint8_t parameter) {
@@ -144,6 +161,8 @@ void writeParameter(uint8_t group, uint8_t parameter) {
     text[position] = '\0';
   } else if (parameter == 3U) {
     formatHundredths(text, (draft_.delayMs[group] + 5UL) / 10UL);
+  } else if (draft_.frequencyTenthsHz[group] == 0U) {
+    strcpy(text, cycleMode_ ? "---" : "--:--");
   } else if (!cycleMode_) {
     formatHoursMinutes(text, enteredTimeMinutes_[group]);
   } else {
@@ -381,15 +400,22 @@ void setCycleMode(bool cycleMode, uint32_t now) {
   if (cycleMode_ == cycleMode) {
     return;
   }
-  cycleMode_ = cycleMode;
-  if (!cycleMode_) {
+  if (!cycleMode) {
     for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT;
          ++group) {
-      enteredTimeMinutes_[group] = 0U;
+      if (draft_.frequencyTenthsHz[group] != 0U) {
+        enteredTimeMinutes_[group] = displayedMinutesForCycles(group);
+      }
       selectedTimeField_[group] = TIME_FIELD_MINUTES;
-      draft_.totalCycles[group] = 0U;
+      timeDerivedFromCycles_[group] = true;
+    }
+  } else {
+    for (uint8_t group = 0; group < cellq::hw::REGULATOR_COUNT;
+         ++group) {
+      timeDerivedFromCycles_[group] = false;
     }
   }
+  cycleMode_ = cycleMode;
   beginModeSync(now);
   if (cycleMode_) {
     DBG_SETUP("MODE,CYCLES");
@@ -399,7 +425,7 @@ void setCycleMode(bool cycleMode, uint32_t now) {
 }
 
 void selectTimeField(uint8_t group) {
-  if (cycleMode_) {
+  if (cycleMode_ || draft_.frequencyTenthsHz[group] == 0U) {
     return;
   }
   selectedTimeField_[group] =
@@ -441,6 +467,7 @@ void adjustEnteredTime(uint8_t group, bool increase) {
   }
   enteredTimeMinutes_[group] =
       static_cast<uint32_t>(hours) * 60UL + minutes;
+  timeDerivedFromCycles_[group] = false;
   updateCyclesFromTime(group);
 }
 
@@ -461,6 +488,8 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
     }
     draft_.pressureTenths[group] = value;
   } else if (parameter == 1U) {
+    const bool wasContinuousOff =
+        draft_.frequencyTenthsHz[group] == 0U;
     uint16_t value = draft_.frequencyTenthsHz[group];
     if (increase) {
       if (value < cellq::config::SQUARE_FREQUENCY_MAX_TENTHS_HZ) {
@@ -470,8 +499,17 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
       value -= cellq::config::SETUP_FREQUENCY_STEP_TENTHS_HZ;
     }
     draft_.frequencyTenthsHz[group] = value;
-    if (!cycleMode_) {
-      updateCyclesFromTime(group);
+    if (!cycleMode_ && value != 0U) {
+      if (wasContinuousOff && timeDerivedFromCycles_[group]) {
+        enteredTimeMinutes_[group] = displayedMinutesForCycles(group);
+      } else {
+        updateCyclesFromTime(group);
+        timeDerivedFromCycles_[group] = false;
+      }
+    }
+    if (wasContinuousOff != (value == 0U)) {
+      writeParameter(group, PARAMETER_COUNT - 1U);
+      writeTimeFieldImage(group);
     }
   } else if (parameter == 2U) {
     uint8_t value = draft_.dutyPercent[group];
@@ -498,10 +536,14 @@ void adjustParameter(uint8_t group, uint8_t parameter, bool increase) {
                   : 0U;
     }
     draft_.delayMs[group] = value;
-    if (!cycleMode_) {
+    if (!cycleMode_ && draft_.frequencyTenthsHz[group] != 0U) {
       updateCyclesFromTime(group);
+      timeDerivedFromCycles_[group] = false;
     }
   } else {
+    if (draft_.frequencyTenthsHz[group] == 0U) {
+      return;
+    }
     if (cycleMode_) {
       uint32_t value = draft_.totalCycles[group];
       const uint32_t step = cellq::config::SETUP_CYCLE_STEP;
